@@ -270,7 +270,7 @@ td.heat { text-align: center; min-width: 64px; }
     </tbody>
   </table>
   </div>
-  <div class="legend"><span>{{ regions.lo | pct }}</span>{% for c in regions.legend %}<span class="sw" style="background: {{ c }}"></span>{% endfor %}<span>{{ regions.hi | pct }}</span><span class="note">Area-weighted accuracy per region; Antarctica is separate because mask conventions differ.</span></div>
+  <div class="legend"><span>{{ regions.lo | pct }}</span>{% for c in regions.legend %}<span class="sw" style="background: {{ c }}"></span>{% endfor %}<span>{{ regions.hi | pct }}</span><span class="note">Area-weighted accuracy per region; Antarctica is separate because mask conventions differ.{% if regions.methods %} Region boundaries: {{ regions.methods | join(", ") }}.{% endif %}</span></div>
   {% else %}<div class="empty">No region scores available.</div>{% endif %}
 </section>
 

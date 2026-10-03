@@ -19,6 +19,24 @@ Effort mapping (OpenAI-compatible servers; the spec leaves this undefined, so th
 Override per provider or per model with `extra.effort_map: {level: {body params}}`
 (model extra wins over provider extra). A level mapped to `null` is refused.
 
+Server facts the local subclasses rely on (docs checked 2026-10-03):
+- Ollama `/v1/chat/completions` honours `reasoning_effort` / `reasoning.effort`; `"none"`
+  requests no thinking; boolean-only thinking models map every other recognised effort to
+  `true`, and unsupported level names silently fall back to the model default (check
+  `/api/show` -> `thinking.values`). `n` and logprobs are NOT supported on `/v1`; logprobs
+  exist only on native `/api/chat` (`logprobs`, `top_logprobs`), where thinking is `think`
+  (bool | model-defined string such as gpt-oss "low"/"medium"/"high" | null).
+  https://docs.ollama.com/api/openai-compatibility , https://docs.ollama.com/capabilities/thinking ,
+  https://docs.ollama.com/api/chat
+- llama.cpp `llama-server` `/v1/chat/completions`: `chat_template_kwargs: {enable_thinking:
+  false}` and `reasoning_effort: "none"` both disable thinking; any other `reasoning_effort` is
+  only handed to the Jinja template (ignored if the template does not use it);
+  `reasoning_budget_tokens` caps thinking per request; `reasoning_format` (`none`|`deepseek`|
+  `deepseek-legacy`) controls `<think>` extraction into `reasoning_content`; OpenAI `logprobs` +
+  `top_logprobs` (default 20) map to native `n_probs`.
+  https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md ,
+  tools/server/server-common.cpp (oaicompat_chat_params_parse)
+
 Thinking runs (any effort other than None/off, or `forced_thinking`) get `max_tokens` raised to at
 least `THINKING_MAX_TOKENS_FLOOR[effort]` so the answer is not cut off after the reasoning.
 """

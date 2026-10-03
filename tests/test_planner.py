@@ -198,6 +198,22 @@ async def test_forced_thinking_marked(env):
     assert any("forced-thinking" in w for w in plan.warnings)
 
 
+async def test_always_thinking_model_starred_without_flag(env):
+    # DeepSeek-R1 cannot stop reasoning (blindearth.thinking_defaults): starred and thinking
+    # even though the registry entry has no forced_thinking flag.
+    r1 = ModelSpec(id="r1", provider="prov", name="deepseek-r1")
+    qwen = ModelSpec(id="q3", provider="prov", name="Qwen/Qwen3-8B")  # thinks by default only
+    opt_out = ModelSpec(id="r1x", provider="prov", name="deepseek-r1", extra={"thinks_by_default": False})
+    for m in (r1, qwen, opt_out):
+        env.registry.models[m.id] = m
+    ef = eval_file([("r1", [RunConfig()]), ("q3", [RunConfig()]), ("r1x", [RunConfig()])])
+    plan = await planner.build_plan(ef, env.registry, env.store, run_pilot=False)
+    c_r1, c_q3, c_x = plan.cells
+    assert c_r1.forced_thinking and c_r1.thinking and c_r1.label == "r1*"
+    assert c_q3.thinking and not c_q3.forced_thinking
+    assert not c_x.forced_thinking and not c_x.thinking
+
+
 async def test_repeats_get_distinct_hashes(env):
     ef = eval_file([("plain", [RunConfig(temperature=1.0, repeats=3)])])
     plan = await planner.build_plan(ef, env.registry, env.store, run_pilot=False)

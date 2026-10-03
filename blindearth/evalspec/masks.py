@@ -6,45 +6,100 @@ True = land. Pixel ``(i, j)`` covers lat ``[90 - (i+1)*180/H, 90 - i*180/H]`` an
 
 Built-in sources (``MaskSpec.id``):
 
-- ``natural-earth-land``: Natural Earth 1:10m land polygons, downloaded on first use from a pinned
+- ``natural-earth-land``: Natural Earth 1:10m land polygons, downloaded on first use from a fixed
   URL into the cache dir (``~/.cache/blindearth`` or ``$BLINDEARTH_CACHE``) and rasterized at
   ``MaskSpec.resolution_km`` (default 1 km, about 40076 x 20038 pixels, ~800 MB as bool, ~100 MB
   packed on disk). Rasterization runs in horizontal strips so peak memory stays near the size of
   the output array.
 - ``gshhg``: GSHHG 2.3.7 full-resolution shorelines. Land = L1 (continents/islands) + L5
   (Antarctica ice front), minus L2 (lakes), plus L3 (islands in lakes), minus L4 (ponds).
-- ``modis-mod44w``: MODIS MOD44W water mask. NASA serves it only as sinusoidal HDF tiles behind an
-  Earthdata login, so there is no stable single-file URL and the download is a MANUAL step:
+- ``modis-mod44w``: MODIS MOD44W v061 water mask (``Water_mask`` layer: 0 = land, 1 = water,
+  250 = fill; fill and nodata count as water). Two ways to get it:
 
-      1. Download the MOD44W v6.1 tiles for one year from LP DAAC (https://lpdaac.usgs.gov/).
-      2. Mosaic and reproject the ``water_mask`` layer to a global EPSG:4326 GeoTIFF, e.g.
-         ``gdalwarp -t_srs EPSG:4326 -te -180 -90 180 90 -tr 0.0025 0.0025 -r mode \
-           HDF4_EOS:EOS_GRID:"<tile>.hdf":MOD44W_250m_GRID:water_mask ... mod44w_global.tif``
-      3. Put it at ``<cache_dir>/modis-mod44w/mod44w_global.tif`` or set ``MaskSpec.path``.
+  * Manual (always works): build a global EPSG:4326 GeoTIFF from the tiles, e.g.
+    ``gdalwarp -t_srs EPSG:4326 -te -180 -90 180 90 -tr 0.0025 0.0025 -r mode <subdatasets>
+    mod44w_global.tif`` (``gdalinfo <tile>.hdf`` lists the exact ``HDF4_EOS:EOS_GRID:...``
+    subdataset names), then put it at ``<cache_dir>/modis-mod44w/mod44w_global.tif`` or set
+    ``MaskSpec.path``.
+  * Automatic (opt-in): set ``BLINDEARTH_MODIS_DOWNLOAD=1``. The tiles of one year
+    (``BLINDEARTH_MODIS_YEAR``, default 2021) are found with a NASA CMR granule search, downloaded
+    from LP DAAC Earthdata Cloud with an Earthdata Login (``EARTHDATA_TOKEN`` bearer token, else
+    the ``urs.earthdata.nasa.gov`` entry of ``~/.netrc`` / ``$NETRC``), and reprojected straight
+    to the requested grid with rasterio (mode resampling). That needs a GDAL build with the HDF4
+    driver; it is checked before anything is downloaded. See :func:`build_mod44w_mask`.
 
-  Pixel value 0 is land; 1 (water) and any fill/nodata value are water.
 - ``upload``: a user image (PNG, JPEG, or GeoTIFF) at ``MaskSpec.path``, prepared by
   :func:`prepare_upload` and downsampled to ``resolution_km`` only when it is finer than that.
 
-Pinned checksums are placeholders (``None``) until someone records them from a trusted download;
-while a checksum is ``None`` the file's sha256 is logged instead of verified. Either way the
-mask's own content hash (``Mask.hash``) goes into the spec hash, so a changed download can never
-be mixed silently with old runs.
+Download integrity
+------------------
+Every download goes to a temp file in the target directory and is renamed into place only after
+it passes the checks, so a truncated file or an HTML error page is never cached. The checks:
+not ``text/html``, ``Content-Length`` matches, a minimum size, the upstream size / MD5 when one is
+recorded in the source (see the ``_Source`` constants), and a format check (zip: CRC test of all
+members plus required layers present; HDF4: magic bytes).
+
+Neither Natural Earth nor GSHHG publishes a sha256 for its archive, so checksums use
+trust-on-first-use: the sha256 of the first good download is written to
+``<cache_dir>/checksums.json`` and each later read of that file is checked against it. A sha256
+pinned in the source (``_Source.sha256``) takes precedence over the lockfile and can't be
+overridden. On a TOFU mismatch, delete the file (and re-download), or set
+``BLINDEARTH_ACCEPT_NEW_CHECKSUMS=1`` once to record the new hash (this also drops stale
+rasterized caches of that source). The rasterized ``masks/*.npz`` cache is not re-checked against
+the archive. Either way the mask's own content hash (``Mask.hash``, unchanged by any of this)
+goes into the spec hash, so a changed download can never be mixed silently with old runs.
+
+Sources checked on 2026-10-03 (docs, plus HTTP HEAD requests only, no data downloaded):
+
+- Natural Earth page https://www.naturalearthdata.com/downloads/10m-physical-vectors/10m-land/
+  (version 5.1.1, no checksum published). A HEAD on the naciscdn.org URL gave
+  ``content-length: 3269070`` and S3 ``etag: "be3001f37196d2894e17aacd13ff2cc2"``. For a
+  single-part S3 upload the ETag is the MD5 of the object; that it is single-part is an
+  assumption (there is no ``-N`` suffix).
+- GSHHG home https://www.soest.hawaii.edu/pwessel/gshhg/ (2.3.7, no checksum published). The old
+  NOAA URL (``ngdc.noaa.gov/mgg/shorelines/data/gshhg/latest/...``) now returns a 404 HTML page,
+  so the SOEST URL is used. HEAD: ``Content-Length: 149157845`` (Apache ETag, not an MD5).
+- MOD44W v061: CMR collection ``C2565805847-LPCLOUD`` (short_name MOD44W, version 061,
+  provider LPCLOUD), https://cmr.earthdata.nasa.gov/search/collections.json?short_name=MOD44W;
+  layers and values from https://www.earthdata.nasa.gov/data/catalog/lpcloud-mod44w-061; one
+  granule per sinusoidal tile per year (318 for 2021), named like
+  ``MOD44W.A2021001.h01v09.061.2024008090424``, with "GET DATA" URLs on
+  ``https://data.lpdaac.earthdatacloud.nasa.gov/lp-prod-protected/MOD44W.061/...hdf``. Granule
+  metadata gives no checksum. CMR paging uses the ``CMR-Search-After`` header with page_size up to
+  2000 (https://cmr.earthdata.nasa.gov/search/site/docs/search/api.html).
+- Earthdata Login: the netrc/basic-auth + cookie flow follows
+  https://urs.earthdata.nasa.gov/documentation/for_users/data_access/python. User tokens last 60
+  days (https://urs.earthdata.nasa.gov/documentation/for_users/user_token). Sending them as
+  ``Authorization: Bearer`` to LP DAAC is shown in LP DAAC forum answers
+  (https://forum.earthdata.nasa.gov/viewtopic.php?p=15142).
+
+Not verified here, because no data was downloaded: the HDF subdataset name (it is matched by a
+``:Water_mask`` suffix, case-insensitive), that the token flow is accepted by
+``data.lpdaac.earthdatacloud.nasa.gov`` with redirects to S3 (the token is sent only to
+Earthdata hosts, never to the S3 redirect target), that GDAL reads the tile CRS from the HDF-EOS
+metadata (the MODIS sinusoidal CRS is used as a fallback), and how long a full mosaic takes.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import math
+import netrc
 import os
+import re
 import struct
 import tempfile
+import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from http.cookiejar import CookieJar
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Callable, Iterator
 
 import numpy as np
 
@@ -181,26 +236,37 @@ class _Source:
     id: str
     label: str
     url: str
-    sha256: str | None  # pinned checksum; None = placeholder, not yet recorded
+    # sha256 pinned from a trusted download. It wins over the TOFU lockfile and can't be
+    # overridden. None = no upstream sha256 exists, so TOFU via <cache_dir>/checksums.json.
+    sha256: str | None
     filename: str
     layers: tuple[_Layer, ...]
+    md5: str | None = None  # upstream-advertised MD5 (e.g. S3 ETag), checked on fresh downloads
+    size: int | None = None  # upstream-advertised byte size, checked on fresh downloads
+    min_size: int = 1  # anything smaller is a truncated file or an error page
 
 
 NATURAL_EARTH = _Source(
     id="natural-earth-land",
-    label="Natural Earth 1:10m land v5.1",
+    label="Natural Earth 1:10m land v5.1.1",
     url="https://naciscdn.org/naturalearth/10m/physical/ne_10m_land.zip",
-    sha256=None,  # TODO: pin after a verified download
+    sha256=None,  # upstream publishes no sha256: TOFU (see module docstring)
     filename="ne_10m_land.zip",
     layers=(_Layer("ne_10m_land.shp", 1),),
+    md5="be3001f37196d2894e17aacd13ff2cc2",  # S3 ETag from a HEAD on 2026-10-03
+    size=3_269_070,  # Content-Length from the same HEAD
+    min_size=1_000_000,
 )
 
 GSHHG = _Source(
     id="gshhg",
     label="GSHHG 2.3.7 full resolution (L1+L5-L2+L3-L4)",
-    url="https://www.ngdc.noaa.gov/mgg/shorelines/data/gshhg/latest/gshhg-shp-2.3.7.zip",
-    sha256=None,  # TODO: pin after a verified download
+    # The NOAA ngdc.noaa.gov/.../gshhg/latest/ URL returns 404 (checked 2026-10-03).
+    url="https://www.soest.hawaii.edu/pwessel/gshhg/gshhg-shp-2.3.7.zip",
+    sha256=None,  # upstream publishes no checksum: TOFU (see module docstring)
     filename="gshhg-shp-2.3.7.zip",
+    size=149_157_845,  # Content-Length from a HEAD on 2026-10-03
+    min_size=50_000_000,
     layers=(
         _Layer("GSHHS_shp/f/GSHHS_f_L1.shp", 1),
         _Layer("GSHHS_shp/f/GSHHS_f_L5.shp", 1, required=False),
@@ -222,30 +288,254 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def _fetch(source: _Source, cache_dir: Path) -> Path:
-    """Return the cached archive, downloading it once. A file placed there by hand is used as is."""
-    dest_dir = cache_dir / "downloads"
-    dest = dest_dir / source.filename
-    if not dest.exists():
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        log.info("downloading %s from %s", source.label, source.url)
-        fd, tmp_name = tempfile.mkstemp(dir=dest_dir, suffix=".part")
-        try:
-            with os.fdopen(fd, "wb") as out, urllib.request.urlopen(source.url, timeout=120) as r:
-                while chunk := r.read(1 << 20):
-                    out.write(chunk)
-            os.replace(tmp_name, dest)
-        except BaseException:
-            Path(tmp_name).unlink(missing_ok=True)
-            raise
-    digest = _sha256_file(dest)
-    if source.sha256 is None:
-        log.warning("no pinned checksum for %s; downloaded file sha256=%s", source.id, digest)
-    elif digest != source.sha256:
+LOCKFILE_NAME = "checksums.json"
+ACCEPT_ENV = "BLINDEARTH_ACCEPT_NEW_CHECKSUMS"
+
+
+class DownloadIntegrityError(ValueError):
+    """A download (or a file in the cache) is truncated, an error page, or not the expected format."""
+
+
+class ChecksumMismatchError(ValueError):
+    """A cached file's sha256 differs from the pinned value or the one recorded on first use."""
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _accept_new() -> bool:
+    return _env_flag(ACCEPT_ENV)
+
+
+def _lock_path(cache_dir: Path) -> Path:
+    return cache_dir / LOCKFILE_NAME
+
+
+def _lock_read(cache_dir: Path) -> dict[str, dict[str, Any]]:
+    p = _lock_path(cache_dir)
+    if not p.exists():
+        return {}
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
         raise ValueError(
-            f"checksum mismatch for {dest}: expected {source.sha256}, got {digest}. "
-            "Delete the file to re-download."
+            f"checksum lockfile {p} is unreadable ({e}); fix or delete it (deleting it means the "
+            "next load trusts whatever is in the cache)"
+        ) from e
+    files = doc.get("files") if isinstance(doc, dict) else None
+    return files if isinstance(files, dict) else {}
+
+
+def _lock_write_entry(cache_dir: Path, key: str, entry: dict[str, Any]) -> None:
+    """Add or replace one entry, rewriting the lockfile atomically (temp file + rename)."""
+    files = _lock_read(cache_dir)
+    files[key] = entry
+    p = _lock_path(cache_dir)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=f".{p.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "files": files}, f, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(tmp, p)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def _verify_or_record(
+    cache_dir: Path,
+    path: Path,
+    *,
+    key: str,
+    url: str,
+    pinned: str | None,
+    validate: Callable[[Path], None] | None = None,
+    on_replace: Callable[[], None] | None = None,
+) -> str:
+    """Check ``path`` against its pinned or recorded sha256, recording it on first use.
+
+    Precedence: a pinned sha256 always wins and a mismatch is fatal. Without a pin, the lockfile
+    entry is used. With no entry yet (first download, or a file placed by hand), the file is
+    validated and its hash recorded. A lockfile mismatch is fatal unless ``ACCEPT_ENV`` is set, in
+    which case the new hash replaces the old one and ``on_replace`` runs (to drop derived caches).
+    """
+    digest = _sha256_file(path)
+    entry_new = {
+        "sha256": digest,
+        "size": path.stat().st_size,
+        "url": url,
+        "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    if pinned is not None:
+        if digest != pinned.lower():
+            raise ChecksumMismatchError(
+                f"checksum mismatch for {path}: pinned sha256 {pinned}, file has {digest}. The "
+                f"pin is part of blindearth and can't be overridden. Delete {path} to re-download; "
+                "if upstream really changed the file, the pin in blindearth/evalspec/masks.py "
+                "needs updating."
+            )
+        entry = _lock_read(cache_dir).get(key)
+        if not entry or entry.get("sha256") != digest:
+            _lock_write_entry(cache_dir, key, {**entry_new, "pinned": True})
+        return digest
+
+    entry = _lock_read(cache_dir).get(key)
+    if entry is None:
+        if validate is not None:
+            validate(path)
+        log.warning(
+            "recording sha256 %s for %s in %s (trust on first use)",
+            digest, path.name, _lock_path(cache_dir),
         )
+        _lock_write_entry(cache_dir, key, entry_new)
+        return digest
+    if entry.get("sha256") == digest:
+        return digest
+    if _accept_new():
+        if validate is not None:
+            validate(path)
+        log.warning(
+            "%s: sha256 changed from %s to %s; accepted because %s is set",
+            path, entry.get("sha256"), digest, ACCEPT_ENV,
+        )
+        _lock_write_entry(cache_dir, key, entry_new)
+        if on_replace is not None:
+            on_replace()
+        return digest
+    raise ChecksumMismatchError(
+        f"checksum mismatch for {path}: {_lock_path(cache_dir)} recorded sha256 "
+        f"{entry.get('sha256')} on {entry.get('recorded_at', '?')}, but the file now has {digest}. "
+        f"Either the cached file was corrupted or replaced (delete {path} to download it again), "
+        f"or upstream published a new version (set {ACCEPT_ENV}=1 once to accept and record the "
+        "new hash). Masks built from different data get different mask hashes, so old and new "
+        "runs won't be mixed."
+    )
+
+
+def _urlopen(url: str, *, opener: urllib.request.OpenerDirector | None = None,
+             headers: dict[str, str] | None = None, timeout: float = 120):
+    """The one network entry point (tests monkeypatch it)."""
+    req = urllib.request.Request(url, headers=dict(headers or {}))
+    if opener is None:
+        return urllib.request.urlopen(req, timeout=timeout)
+    return opener.open(req, timeout=timeout)
+
+
+def _download(
+    url: str,
+    dest: Path,
+    *,
+    opener: urllib.request.OpenerDirector | None = None,
+    min_size: int = 1,
+    expected_size: int | None = None,
+    expected_md5: str | None = None,
+    validate: Callable[[Path], None] | None = None,
+) -> None:
+    """Download ``url`` to ``dest`` atomically: temp file in the same dir, checks, then rename.
+
+    Upstream size/MD5 mismatches are fatal unless ``ACCEPT_ENV`` is set (upstream may publish
+    a new version); the format check (``validate``) and the minimum size can't be skipped.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=f".{dest.name}.", suffix=".part")
+    tmp = Path(tmp_name)
+    try:
+        md5 = hashlib.md5(usedforsecurity=False)
+        n = 0
+        with os.fdopen(fd, "wb") as out, _urlopen(url, opener=opener) as r:
+            headers = getattr(r, "headers", None) or {}
+            ctype = (headers.get("Content-Type") or "").lower()
+            if ctype.startswith("text/html"):
+                final = r.geturl() if hasattr(r, "geturl") else url
+                raise DownloadIntegrityError(
+                    f"{url} returned an HTML page (final URL {final}) instead of data; it is "
+                    "probably an error or login page"
+                )
+            clen = headers.get("Content-Length")
+            while chunk := r.read(1 << 20):
+                out.write(chunk)
+                md5.update(chunk)
+                n += len(chunk)
+        if clen is not None and str(clen).isdigit() and int(clen) != n:
+            raise DownloadIntegrityError(
+                f"{url}: truncated download ({n} of {clen} bytes)"
+            )
+        if n < min_size:
+            raise DownloadIntegrityError(
+                f"{url}: download is only {n} bytes (expected at least {min_size}); probably an "
+                "error page or truncated"
+            )
+        problems = []
+        if expected_size is not None and n != expected_size:
+            problems.append(f"size {n} != expected {expected_size}")
+        if expected_md5 is not None and md5.hexdigest() != expected_md5.lower():
+            problems.append(f"md5 {md5.hexdigest()} != expected {expected_md5}")
+        if problems:
+            msg = f"{url}: {'; '.join(problems)} (values recorded from upstream)"
+            if not _accept_new():
+                raise DownloadIntegrityError(
+                    f"{msg}. If upstream released a new version, set {ACCEPT_ENV}=1 to accept it."
+                )
+            log.warning("%s; accepted because %s is set", msg, ACCEPT_ENV)
+        if validate is not None:
+            validate(tmp)
+        os.replace(tmp, dest)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _find_member(names: list[str], member: str) -> str | None:
+    by_path = {Path(n).as_posix(): n for n in names}
+    by_base = {Path(n).name: n for n in names}
+    return by_path.get(member) or by_base.get(Path(member).name)
+
+
+def _validate_zip(path: Path, source: _Source) -> None:
+    """The archive must be a zip whose members all pass their CRC check and that has every
+    required layer (``.shp``)."""
+    if path.stat().st_size < source.min_size:
+        raise DownloadIntegrityError(
+            f"{path} is {path.stat().st_size} bytes; expected at least {source.min_size}"
+        )
+    if not zipfile.is_zipfile(path):
+        raise DownloadIntegrityError(f"{path} is not a zip archive")
+    try:
+        with zipfile.ZipFile(path) as zf:
+            bad = zf.testzip()
+            names = zf.namelist()
+    except (zipfile.BadZipFile, OSError, EOFError) as e:
+        raise DownloadIntegrityError(f"{path} is a corrupt zip archive: {e}") from e
+    if bad is not None:
+        raise DownloadIntegrityError(f"{path}: member {bad} fails its CRC check")
+    missing = [l.member for l in source.layers if l.required and _find_member(names, l.member) is None]
+    if missing:
+        raise DownloadIntegrityError(f"{path} is missing required members: {', '.join(missing)}")
+
+
+def _drop_rasterized(source_id: str, cache_dir: Path) -> None:
+    for p in (cache_dir / "masks").glob(f"{source_id}_*.npz"):
+        log.warning("removing %s (built from the previous archive)", p)
+        p.unlink(missing_ok=True)
+
+
+def _fetch(source: _Source, cache_dir: Path) -> Path:
+    """Return the cached archive, downloading it once, verified against its pinned or recorded
+    sha256. A file placed there by hand is validated and recorded on first use."""
+    dest = cache_dir / "downloads" / source.filename
+    validate = lambda p: _validate_zip(p, source)  # noqa: E731
+    if not dest.exists():
+        log.info("downloading %s from %s", source.label, source.url)
+        _download(
+            source.url, dest, min_size=source.min_size, expected_size=source.size,
+            expected_md5=source.md5, validate=validate,
+        )
+    _verify_or_record(
+        cache_dir, dest, key=f"downloads/{source.filename}", url=source.url, pinned=source.sha256,
+        validate=validate, on_replace=lambda: _drop_rasterized(source.id, cache_dir),
+    )
     return dest
 
 
@@ -416,19 +706,332 @@ def _check_global_bounds(bounds, path) -> None:
         )
 
 
-def _modis_mask(spec: MaskSpec, cache_dir: Path) -> Mask:
-    path = Path(spec.path).expanduser() if spec.path else cache_dir / "modis-mod44w" / "mod44w_global.tif"
+# ---- MODIS MOD44W v061 automatic download (CMR search + LP DAAC tiles + rasterio mosaic)
+
+MODIS_DOWNLOAD_ENV = "BLINDEARTH_MODIS_DOWNLOAD"
+MODIS_YEAR_ENV = "BLINDEARTH_MODIS_YEAR"
+MODIS_DEFAULT_YEAR = 2021  # 318 v061 granules listed in CMR (checked 2026-10-03)
+EARTHDATA_TOKEN_ENV = "EARTHDATA_TOKEN"
+EARTHDATA_URS_HOST = "urs.earthdata.nasa.gov"
+CMR_GRANULES_URL = "https://cmr.earthdata.nasa.gov/search/granules.umm_json"
+MOD44W_SHORT_NAME = "MOD44W"
+MOD44W_VERSION = "061"
+MOD44W_PROVIDER = "LPCLOUD"
+_MOD44W_FILL = 250
+_HDF4_MAGIC = b"\x0e\x03\x13\x01"
+# MODIS sinusoidal grid: sphere radius and tile edge (36 x 18 tiles of 10 deg at the equator).
+MODIS_SPHERE_R = 6371007.181
+MODIS_TILE_M = 1111950.5197665233
+MODIS_SINU_CRS = "+proj=sinu +lon_0=0 +x_0=0 +y_0=0 +R=6371007.181 +units=m +no_defs"
+_TILE_RE = re.compile(r"\.h(\d{2})v(\d{2})\.")
+
+
+class EarthdataAuthError(RuntimeError):
+    """No usable Earthdata Login credentials, or the server rejected them."""
+
+
+def _is_earthdata_host(host: str) -> bool:
+    host = host.lower().rstrip(".")
+    return host == EARTHDATA_URS_HOST or host.endswith(".earthdata.nasa.gov") or host.endswith(
+        ".earthdatacloud.nasa.gov"
+    )
+
+
+class _EarthdataBearerHandler(urllib.request.BaseHandler):
+    """Adds ``Authorization: Bearer <token>`` to HTTPS requests to Earthdata hosts only.
+
+    It runs for every request, including redirects, and uses an unredirected header, so the token
+    is never sent to the presigned S3 URL the data server redirects to (S3 would reject a second
+    auth method, and the token must not leak to other hosts).
+    """
+
+    handler_order = 400
+
+    def __init__(self, token: str):
+        self.token = token
+
+    def https_request(self, req: urllib.request.Request) -> urllib.request.Request:
+        host = urllib.parse.urlsplit(req.full_url).hostname or ""
+        req.headers.pop("Authorization", None)
+        req.unredirected_hdrs.pop("Authorization", None)
+        if _is_earthdata_host(host):
+            req.add_unredirected_header("Authorization", f"Bearer {self.token}")
+        return req
+
+    def http_request(self, req: urllib.request.Request) -> urllib.request.Request:
+        req.headers.pop("Authorization", None)  # never send a token over plain HTTP
+        req.unredirected_hdrs.pop("Authorization", None)
+        return req
+
+
+def _netrc_credentials() -> tuple[str, str] | None:
+    path = Path(os.environ.get("NETRC") or "~/.netrc").expanduser()
     if not path.exists():
-        raise FileNotFoundError(
-            f"MODIS MOD44W mask not found at {path}. It has no stable download URL: build a global "
-            "EPSG:4326 GeoTIFF from the MOD44W tiles (see blindearth.evalspec.masks docstring) and "
-            "place it there, or set mask.path."
+        return None
+    try:
+        auth = netrc.netrc(str(path)).authenticators(EARTHDATA_URS_HOST)
+    except (netrc.NetrcParseError, OSError) as e:
+        raise EarthdataAuthError(f"could not parse {path}: {e}") from e
+    if not auth or not auth[0] or not auth[2]:
+        return None
+    return auth[0], auth[2]
+
+
+def _earthdata_opener() -> tuple[urllib.request.OpenerDirector, str]:
+    """An opener authenticated for Earthdata Login: bearer token first, then ~/.netrc."""
+    cookies = urllib.request.HTTPCookieProcessor(CookieJar())
+    token = os.environ.get(EARTHDATA_TOKEN_ENV, "").strip()
+    if token:
+        return urllib.request.build_opener(_EarthdataBearerHandler(token), cookies), "token"
+    creds = _netrc_credentials()
+    if creds is not None:
+        # NASA's documented urllib flow: answer the URS 401 with basic auth, keep session cookies.
+        pm = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+        pm.add_password(None, f"https://{EARTHDATA_URS_HOST}", creds[0], creds[1])
+        return urllib.request.build_opener(urllib.request.HTTPBasicAuthHandler(pm), cookies), "netrc"
+    raise EarthdataAuthError(
+        "MODIS MOD44W download needs NASA Earthdata Login credentials. Create an account at "
+        f"https://{EARTHDATA_URS_HOST}, then either set {EARTHDATA_TOKEN_ENV} to a user token "
+        "(profile > Generate Token; tokens expire after 60 days) or add\n"
+        f"    machine {EARTHDATA_URS_HOST} login <user> password <password>\n"
+        "to ~/.netrc (chmod 600) or the file named by $NETRC."
+    )
+
+
+@dataclass(frozen=True)
+class _Granule:
+    name: str  # GranuleUR, e.g. MOD44W.A2021001.h01v09.061.2024008090424
+    h: int
+    v: int
+    url: str
+
+
+def _cmr_mod44w_granules(year: int) -> list[_Granule]:
+    """All MOD44W v061 tiles for ``year`` (one per h/v; the latest production wins)."""
+    params = {
+        "short_name": MOD44W_SHORT_NAME,
+        "version": MOD44W_VERSION,
+        "provider": MOD44W_PROVIDER,
+        "temporal": f"{year}-01-01T00:00:00Z,{year}-12-31T23:59:59Z",
+        "page_size": "2000",
+    }
+    url = f"{CMR_GRANULES_URL}?{urllib.parse.urlencode(params)}"
+    prefix = f"{MOD44W_SHORT_NAME}.A{year}001."
+    best: dict[tuple[int, int], _Granule] = {}
+    search_after: str | None = None
+    for _page in range(100):  # 318 granules fit in one page; the cap only guards a loop
+        headers = {"CMR-Search-After": search_after} if search_after else None
+        with _urlopen(url, headers=headers, timeout=60) as r:
+            doc = json.loads(r.read().decode("utf-8"))
+            search_after = (getattr(r, "headers", None) or {}).get("CMR-Search-After")
+        items = doc.get("items") or []
+        for item in items:
+            umm = item.get("umm") or {}
+            name = umm.get("GranuleUR") or ""
+            m = _TILE_RE.search(name)
+            if not name.startswith(prefix) or m is None:
+                continue
+            data_url = next(
+                (
+                    u.get("URL")
+                    for u in umm.get("RelatedUrls") or []
+                    if u.get("Type") == "GET DATA"
+                    and str(u.get("URL", "")).startswith("https://")
+                    and str(u.get("URL", "")).lower().endswith(".hdf")
+                ),
+                None,
+            )
+            if data_url is None:
+                continue
+            g = _Granule(name, int(m.group(1)), int(m.group(2)), data_url)
+            prev = best.get((g.h, g.v))
+            if prev is None or g.name > prev.name:  # names end in the production timestamp
+                best[(g.h, g.v)] = g
+        if not items or not search_after:
+            break
+    if not best:
+        raise ValueError(
+            f"CMR returned no {MOD44W_SHORT_NAME} v{MOD44W_VERSION} granules for {year} ({url})"
         )
+    return sorted(best.values(), key=lambda g: (g.v, g.h))
+
+
+def _validate_hdf4(path: Path) -> None:
+    with open(path, "rb") as f:
+        head = f.read(4)
+    if head != _HDF4_MAGIC:
+        raise DownloadIntegrityError(f"{path} is not an HDF4 file (got {head!r})")
+
+
+def modis_tile_bounds(h: int, v: int) -> tuple[float, float, float, float] | None:
+    """(west, south, east, north) in degrees enclosing sinusoidal tile h/v, or None when the
+    tile lies entirely outside the globe. Tile v spans exactly lat [80 - 10v, 90 - 10v]."""
+    north = 90.0 - 10.0 * v
+    south = north - 10.0
+    if north >= 90.0 or south <= -90.0:
+        return (-180.0, south, 180.0, north)  # touches a pole: any longitude
+    x0 = (h - 18) * MODIS_TILE_M
+    x1 = x0 + MODIS_TILE_M
+    lons = [
+        math.degrees(x / (MODIS_SPHERE_R * math.cos(math.radians(lat))))
+        for x in (x0, x1)
+        for lat in (south, north)
+    ]
+    west, east = max(-180.0, min(lons)), min(180.0, max(lons))
+    if west >= 180.0 or east <= -180.0 or west >= east:
+        return None
+    return (west, south, east, north)
+
+
+def _require_hdf4_driver() -> None:
+    import rasterio
+
+    with rasterio.Env() as env:
+        drivers = env.drivers()
+    if "HDF4" not in drivers:
+        raise RuntimeError(
+            "the GDAL build used by rasterio has no HDF4 driver, so MOD44W .hdf tiles can't be "
+            "read (the PyPI rasterio wheels usually lack it). Install rasterio/GDAL from "
+            "conda-forge, or build the GeoTIFF manually (see blindearth.evalspec.masks docstring)."
+        )
+
+
+def _read_mod44w_tile(path: Path) -> tuple[np.ndarray, Any, Any]:
+    """(Water_mask band, affine transform, CRS) of one MOD44W HDF tile."""
+    import rasterio
+    from rasterio.crs import CRS
+
+    with rasterio.open(path) as ds:
+        subs = list(ds.subdatasets)
+    name = next((s for s in subs if s.lower().endswith(":water_mask")), None)
+    if name is None:
+        raise ValueError(f"{path}: no Water_mask subdataset (found {subs})")
+    with rasterio.open(name) as src:
+        return src.read(1), src.transform, src.crs or CRS.from_string(MODIS_SINU_CRS)
+
+
+def _burn_modis_tile(out: np.ndarray, h: int, v: int, band: np.ndarray, transform, crs) -> None:
+    """Reproject one tile (0 = land, 1 = water, 250 = fill) into the global bool grid ``out``.
+    Only the tile's own footprint is touched, so neighbouring tiles never overwrite each other."""
+    from rasterio.enums import Resampling
+    from rasterio.transform import from_origin
+    from rasterio.warp import reproject
+
+    bounds = modis_tile_bounds(h, v)
+    if bounds is None:
+        return
+    west, south, east, north = bounds
+    H, W = out.shape
+    dlon, dlat = 360.0 / W, 180.0 / H
+    r0 = max(0, int(math.floor((90.0 - north) / dlat)) - 1)
+    r1 = min(H, int(math.ceil((90.0 - south) / dlat)) + 1)
+    c0 = max(0, int(math.floor((west + 180.0) / dlon)) - 1)
+    c1 = min(W, int(math.ceil((east + 180.0) / dlon)) + 1)
+    if r1 <= r0 or c1 <= c0:
+        return
+    dst = np.full((r1 - r0, c1 - c0), 255, dtype=np.uint8)
+    reproject(
+        source=np.ascontiguousarray(band, dtype=np.uint8),
+        destination=dst,
+        src_transform=transform,
+        src_crs=crs,
+        src_nodata=_MOD44W_FILL,
+        dst_transform=from_origin(-180.0 + c0 * dlon, 90.0 - r0 * dlat, dlon, dlat),
+        dst_crs="EPSG:4326",
+        dst_nodata=255,
+        resampling=Resampling.mode,
+    )
+    out[r0:r1, c0:c1] |= dst == 0
+
+
+def build_mod44w_mask(
+    out_shape: tuple[int, int], cache_dir: Path, year: int = MODIS_DEFAULT_YEAR
+) -> np.ndarray:
+    """Download (once) the MOD44W v061 tiles of ``year`` and mosaic them to a bool land grid.
+
+    Tiles are cached under ``<cache_dir>/downloads/modis-mod44w/<year>/`` and verified like the
+    other downloads (atomic write, HDF4 magic check, TOFU sha256 in ``checksums.json``). Tiles
+    absent from the product (open ocean) stay water. Needs rasterio with GDAL's HDF4 driver and
+    Earthdata Login credentials (see :func:`_earthdata_opener`).
+    """
+    _require_hdf4_driver()
+    opener, how = _earthdata_opener()
+    granules = _cmr_mod44w_granules(year)
+    log.info("MOD44W %s: %d tiles (auth: %s)", year, len(granules), how)
+    tile_dir = cache_dir / "downloads" / "modis-mod44w" / str(year)
+    out = np.zeros(out_shape, dtype=bool)
+    for i, g in enumerate(granules, 1):
+        fname = g.url.rsplit("/", 1)[-1]
+        dest = tile_dir / fname
+        if not dest.exists():
+            log.info("MOD44W tile %d/%d: %s", i, len(granules), fname)
+            try:
+                _download(g.url, dest, opener=opener, min_size=1024, validate=_validate_hdf4)
+            except urllib.error.HTTPError as e:
+                if e.code in (401, 403):
+                    raise EarthdataAuthError(
+                        f"Earthdata rejected the {how} credentials for {g.url} (HTTP {e.code}). "
+                        "Check that the token hasn't expired, and that the account can download "
+                        "LP DAAC data."
+                    ) from e
+                raise
+            except DownloadIntegrityError as e:
+                if "HTML page" in str(e):
+                    raise EarthdataAuthError(
+                        f"{e}. This is usually the Earthdata login page: the {how} credentials "
+                        "were not accepted."
+                    ) from e
+                raise
+        _verify_or_record(
+            cache_dir, dest, key=f"downloads/modis-mod44w/{year}/{fname}", url=g.url,
+            pinned=None, validate=_validate_hdf4,
+        )
+        band, transform, crs = _read_mod44w_tile(dest)
+        _burn_modis_tile(out, g.h, g.v, band, transform, crs)
+    return out
+
+
+def _modis_year() -> int:
+    raw = os.environ.get(MODIS_YEAR_ENV, "").strip()
+    if not raw:
+        return MODIS_DEFAULT_YEAR
+    try:
+        year = int(raw)
+    except ValueError:
+        raise ValueError(f"{MODIS_YEAR_ENV} must be a year like 2021, got {raw!r}") from None
+    if not 2000 <= year <= 2100:
+        raise ValueError(f"{MODIS_YEAR_ENV} must be a year like 2021, got {raw!r}")
+    return year
+
+
+def _modis_mask(spec: MaskSpec, cache_dir: Path) -> Mask:
     h, w = shape_for_resolution(spec.resolution_km)
-    data = _read_global_raster(path, (h, w), land_value=0)
+    manual = Path(spec.path).expanduser() if spec.path else cache_dir / "modis-mod44w" / "mod44w_global.tif"
+    if spec.path or manual.exists():
+        if not manual.exists():
+            raise FileNotFoundError(f"MODIS MOD44W mask not found at {manual} (mask.path)")
+        data = _read_global_raster(manual, (h, w), land_value=0)
+        label = f"MODIS MOD44W ({manual.name}) at {data.shape[1]}x{data.shape[0]}"
+    else:
+        year = _modis_year()
+        cached = (
+            cache_dir / "masks"
+            / f"modis-mod44w-v{MOD44W_VERSION}-{year}_{_res_tag(spec.resolution_km)}_{w}x{h}.npz"
+        )
+        data = _load_cached(cached)
+        if data is None:
+            if not _env_flag(MODIS_DOWNLOAD_ENV):
+                raise FileNotFoundError(
+                    f"MODIS MOD44W mask not found at {manual}. Either set {MODIS_DOWNLOAD_ENV}=1 "
+                    f"(with {EARTHDATA_TOKEN_ENV} or a ~/.netrc Earthdata entry) to download and "
+                    "mosaic the tiles automatically, or build a global EPSG:4326 GeoTIFF by hand "
+                    "(see blindearth.evalspec.masks docstring) and put it there or set mask.path."
+                )
+            data = build_mod44w_mask((h, w), cache_dir, year)
+            _save_cached(cached, data)
+        label = f"MODIS MOD44W v{MOD44W_VERSION} {year} (LP DAAC tiles) at {w}x{h}"
     if spec.invert:
-        np.logical_not(data, out=data)
-    label = f"MODIS MOD44W ({path.name}) at {data.shape[1]}x{data.shape[0]}"
+        data = ~data
     return Mask.from_array(data, label)
 
 
@@ -683,4 +1286,9 @@ __all__ = [
     "default_cache_dir",
     "read_shp_polygons",
     "rasterize_shapes",
+    "build_mod44w_mask",
+    "modis_tile_bounds",
+    "ChecksumMismatchError",
+    "DownloadIntegrityError",
+    "EarthdataAuthError",
 ]

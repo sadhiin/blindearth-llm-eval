@@ -79,8 +79,58 @@ def test_effective_config_thinking_raises_max_tokens_and_is_idempotent():
 
 
 def test_is_thinking():
-    assert not is_thinking(RunConfig(), M)
-    assert not is_thinking(RunConfig(effort="off"), M)
-    assert is_thinking(RunConfig(effort="low"), M)
+    plain = ModelSpec(id="x", provider="p", name="x")
+    assert not is_thinking(RunConfig(), plain)
+    assert not is_thinking(RunConfig(effort="off"), plain)
+    assert is_thinking(RunConfig(effort="low"), plain)
     forced = ModelSpec(id="x", provider="p", name="x", forced_thinking=True)
     assert is_thinking(RunConfig(), forced)
+    assert is_thinking(RunConfig(effort="off"), forced)
+
+
+def test_is_thinking_uses_provider_defaults():
+    # Opus 5.5 cannot turn thinking off: thinking with no effort and even with effort "off".
+    assert is_thinking(RunConfig(), M)
+    assert is_thinking(RunConfig(effort="off"), M)
+    # Sonnet 5 thinks by default but can be turned off.
+    sonnet5 = ModelSpec(id="s5", provider="anthropic", name="claude-sonnet-5")
+    assert is_thinking(RunConfig(), sonnet5)
+    assert not is_thinking(RunConfig(effort="off"), sonnet5)
+    # Haiku 4.5: thinking is opt-in.
+    haiku = ModelSpec(id="h", provider="anthropic", name="claude-haiku-4-5")
+    assert not is_thinking(RunConfig(), haiku)
+    assert is_thinking(RunConfig(effort="low"), haiku)
+    # gpt-5.1 defaults to reasoning_effort "none"; gpt-5.5 to "medium".
+    assert not is_thinking(RunConfig(), ModelSpec(id="a", provider="openai", name="gpt-5.1"))
+    assert is_thinking(RunConfig(), ModelSpec(id="b", provider="openai", name="gpt-5.5"))
+    # Unknown provider id: inferred from the model name.
+    flash = ModelSpec(id="f", provider="my-gemini", name="gemini-2.5-flash")
+    assert is_thinking(RunConfig(), flash)
+    assert not is_thinking(RunConfig(effort="off"), flash)
+    # Explicit kind wins over inference.
+    assert is_thinking(RunConfig(), ModelSpec(id="q", provider="box", name="qwen3-8b"), "ollama")
+    assert not is_thinking(RunConfig(), ModelSpec(id="g", provider="box", name="gpt-5.5"), "google")
+
+
+def test_is_thinking_registry_override():
+    off = ModelSpec(id="f", provider="google", name="gemini-2.5-flash", extra={"thinks_by_default": False})
+    assert not is_thinking(RunConfig(), off)
+    on = ModelSpec(id="c", provider="my-vllm", name="my-reasoner", extra={"thinks_by_default": True})
+    assert is_thinking(RunConfig(), on)
+    assert not is_thinking(RunConfig(effort="off"), on)
+
+
+def test_hash_unchanged_for_non_default_thinking_models():
+    # A model whose label did not change keeps the same effective config as before the
+    # thinking-defaults table existed (plain cap of 16 tokens, no thinking floor).
+    haiku = ModelSpec(id="h", provider="anthropic", name="claude-haiku-4-5")
+    explicit = RunConfig(temperature=X.temperature, n_samples=X.n_samples, max_output_tokens=DEFAULT_PLAIN_MAX_OUTPUT_TOKENS)
+    assert h(RunConfig(), model=haiku) == h(explicit, model=haiku)
+
+
+def test_default_thinking_model_gets_thinking_floor_in_hash():
+    sonnet5 = ModelSpec(id="s5", provider="anthropic", name="claude-sonnet-5")
+    floor = RunConfig(max_output_tokens=8192)
+    assert h(RunConfig(), model=sonnet5) == h(floor, model=sonnet5)
+    # Turning thinking off is a different run.
+    assert h(RunConfig(effort="off"), model=sonnet5) != h(RunConfig(), model=sonnet5)

@@ -12,14 +12,25 @@ Effort mapping (normalized -> native):
 | normalized | ollama                         | llama.cpp                                         | transformers                          |
 |------------|--------------------------------|---------------------------------------------------|---------------------------------------|
 | off        | `reasoning_effort: "none"`     | `chat_template_kwargs: {enable_thinking: false}`  | chat template `enable_thinking=False` |
-| low        | `reasoning_effort: "low"`      | refused                                           | refused                               |
-| medium     | `reasoning_effort: "medium"`   | refused                                           | refused                               |
-| high       | `reasoning_effort: "high"`     | refused                                           | refused                               |
+| low        | refused (see below)            | refused                                           | refused                               |
+| medium     | refused (see below)            | refused                                           | refused                               |
+| high       | refused (see below)            | refused                                           | refused                               |
 | max        | refused                        | refused                                           | refused                               |
 
-llama.cpp has no per-request reasoning budget and transformers has no effort concept beyond the
-chat template switch, so those levels are refused unless the registry sets
-`extra.effort_map` (for transformers the values are extra chat-template kwargs).
+Ollama low/medium/high (and provider-native strings): Ollama's `/v1` endpoint maps every
+recognised effort to plain `think: true` on boolean-only thinking models (qwen3, deepseek-r1, ...)
+and resolves unsupported level names to the model default, so a level could be silently ignored
+(https://docs.ollama.com/api/openai-compatibility, https://docs.ollama.com/capabilities/thinking).
+They are refused unless the registry maps them in `extra.effort_map` (model or provider extra),
+e.g. `{low: {reasoning_effort: low}}` for gpt-oss, whose `/api/show` `thinking.values` lists
+low/medium/high; or a stored probe result lists the level in `supported_efforts` (then
+`reasoning_effort: <level>` is sent). A probe run on the default mapping cannot list them (it
+skips levels `map_config` refuses), so in practice `effort_map` is the way to enable them.
+
+llama.cpp has no effort semantics of its own (a non-"none" `reasoning_effort` is only handed to
+the chat template) and transformers has no effort concept beyond the chat template switch, so
+those levels are refused unless the registry sets `extra.effort_map` (for transformers the
+values are extra chat-template kwargs).
 """
 
 from __future__ import annotations
@@ -60,12 +71,28 @@ class OllamaAdapter(OpenAICompatAdapter):
     default_logprobs = False  # only recent Ollama versions return logprobs; the probe decides
     default_top_logprobs_max = None
     EFFORT_MAP: dict[str, Any] = {
-        "off": {"reasoning_effort": "none"},
-        "low": {"reasoning_effort": "low"},
-        "medium": {"reasoning_effort": "medium"},
-        "high": {"reasoning_effort": "high"},
+        "off": {"reasoning_effort": "none"},  # documented: "none" requests no thinking
+        "low": None,  # refused unless effort_map or a probe says otherwise (see module doc)
+        "medium": None,
+        "high": None,
         "max": None,
     }
+
+    def _effort_params(self, effort: str | None) -> dict[str, Any]:
+        if effort is None:
+            return {}
+        if resolve_effort_map(self, self.EFFORT_MAP).get(effort) is not None:
+            return super()._effort_params(effort)  # default or explicit registry mapping
+        caps = self.capabilities
+        if (effort != "max" and caps is not None and caps.probed_at
+                and effort in (caps.supported_efforts or [])):
+            return {"reasoning_effort": effort}
+        raise UnsupportedConfigError(
+            f"effort={effort!r} refused for Ollama model {self.model.name}: Ollama silently "
+            "falls back to plain thinking on/off or the model default for levels the model does "
+            "not define (see /api/show thinking.values); map it explicitly in extra.effort_map, "
+            f"e.g. {{{effort}: {{reasoning_effort: {effort}}}}}"
+        )
 
     def default_capabilities(self) -> Capabilities:
         caps = super().default_capabilities()

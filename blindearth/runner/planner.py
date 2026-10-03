@@ -20,7 +20,7 @@ from blindearth.pricing import cost_usd
 from blindearth.providers.base import Adapter, UnsupportedConfigError
 from blindearth.providers.registry import build_adapter
 from blindearth.ratelimit import ProviderLimiter, call_with_retries
-from blindearth.runner.hashing import effective_config, is_thinking, run_hash
+from blindearth.runner.hashing import effective_config, is_thinking, model_always_thinks, run_hash
 from blindearth.types import (
     CallParams,
     Capabilities,
@@ -359,7 +359,8 @@ async def build_plan(
                         refused=refusal,
                         native_params=native,
                         thinking=thinking,
-                        forced_thinking=bool(model.forced_thinking),
+                        # Star models that cannot stop thinking, flagged or not.
+                        forced_thinking=model_always_thinks(model, provider.kind),
                         resolved_version=resolved,
                         use_batch=use_batch,
                         notes=list(notes),

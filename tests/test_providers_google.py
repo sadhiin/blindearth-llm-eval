@@ -35,21 +35,145 @@ class FakeModels:
         return r
 
 
+class FakeBatches:
+    def __init__(self):
+        self.created = []
+        self.jobs = {}
+
+    async def create(self, *, model, src, config=None):
+        name = f"batches/{len(self.created)}"
+        self.created.append({"model": model, "src": src, "config": config})
+        self.jobs[name] = NS(name=name, state=NS(name="JOB_STATE_PENDING"), dest=None, error=None)
+        return self.jobs[name]
+
+    async def get(self, *, name):
+        return self.jobs[name]
+
+
 class FakeClient:
     def __init__(self, responses=()):
-        self.aio = NS(models=FakeModels(responses))
+        self.aio = NS(models=FakeModels(responses), batches=FakeBatches())
 
 
-def _adapter(name="gemini-2.5-flash", responses=()):
-    return GoogleAdapter(PROV, ModelSpec(id=name, provider="google", name=name), api_key="k",
-                         client=FakeClient(responses))
+def _adapter(name="gemini-2.5-flash", responses=(), extra=None, prov=PROV):
+    return GoogleAdapter(prov, ModelSpec(id=name, provider="google", name=name,
+                                         extra=extra or {}),
+                         api_key="k", client=FakeClient(responses))
 
 
 def test_family_detection():
     assert gemini_family("gemini-2.5-pro") == "g25pro"
-    assert gemini_family("gemini-2.5-flash-lite") == "g25flash"
+    assert gemini_family("gemini-2.5-flash-lite") == "g25flashlite"
+    assert gemini_family("gemini-2.5-flash") == "g25flash"
     assert gemini_family("gemini-3-pro-preview") == "g3"
+    assert gemini_family("gemini-flash-latest") == "g3"
     assert gemini_family("gemini-2.0-flash") == "g2"
+
+
+def test_gemini3_levels_per_model():
+    g3pro = _adapter("gemini-3-pro-preview")
+    with pytest.raises(UnsupportedConfigError):  # 3 Pro: low/high only
+        g3pro.map_config(RunConfig(effort="medium"), ExtractionMode.SAMPLE)
+    with pytest.raises(UnsupportedConfigError):
+        g3pro.map_config(RunConfig(effort="minimal"), ExtractionMode.SAMPLE)
+    assert g3pro.map_config(RunConfig(effort="low"), ExtractionMode.SAMPLE)[
+        "thinking_config"] == {"thinking_level": "LOW"}
+    flash = _adapter("gemini-3-flash-preview")
+    assert flash.map_config(RunConfig(effort="minimal"), ExtractionMode.SAMPLE)[
+        "thinking_config"] == {"thinking_level": "MINIMAL"}
+    f38 = _adapter("gemini-3.8-flash")
+    with pytest.raises(UnsupportedConfigError):
+        f38.map_config(RunConfig(effort="minimal"), ExtractionMode.SAMPLE)
+    assert "minimal" not in f38.default_capabilities().supported_efforts
+    # explicit override is trusted
+    ov = _adapter("gemini-3.8-flash", extra={"thinking_levels": ["minimal", "low"]})
+    assert ov.map_config(RunConfig(effort="minimal"), ExtractionMode.SAMPLE)[
+        "thinking_config"] == {"thinking_level": "MINIMAL"}
+
+
+def test_flash_lite_off_by_default_and_budget_checks():
+    lite = _adapter("gemini-2.5-flash-lite")
+    assert "max_output_tokens" not in lite.map_config(RunConfig(), ExtractionMode.SAMPLE)
+    assert lite.map_config(RunConfig(effort="off"), ExtractionMode.SAMPLE)[
+        "thinking_config"] == {"thinking_budget": 0}
+    assert not lite._thinks(None, None)
+    assert _adapter("gemini-2.5-flash")._thinks(None, None)
+    assert _adapter("gemini-3-pro-preview")._thinks(None, None)
+    forced = _adapter("gemini-2.5-flash-lite", extra={"thinks_by_default": True})
+    assert "max_output_tokens" in forced.map_config(RunConfig(), ExtractionMode.SAMPLE)
+    bad = _adapter("gemini-2.5-pro", extra={"thinking_levels": None})
+    bad.profile = dict(bad.profile, map={**bad.profile["map"], "tiny": {"thinking_budget": 64}})
+    with pytest.raises(UnsupportedConfigError):  # below 2.5 Pro minimum of 128
+        bad.map_config(RunConfig(effort="tiny"), ExtractionMode.SAMPLE)
+    both = _adapter("gemini-3-flash-preview", extra={
+        "effort_map": {"low": {"thinking_level": "LOW", "thinking_budget": 512}}})
+    with pytest.raises(UnsupportedConfigError):
+        both.map_config(RunConfig(effort="low"), ExtractionMode.SAMPLE)
+
+
+async def test_batch_submit_uses_same_config_and_metadata_keys():
+    a = _adapter()
+    assert a.supports_batch and a.default_capabilities().supports_batch
+    params = CallParams(temperature=1.0, max_output_tokens=16, effort="low", n=2)
+    bid = await a.submit_batch([("p1", "prompt1", "sys", params), ("p2", "prompt2", "sys", params)])
+    created = a._client.aio.batches.created
+    assert bid == "batches/0" and len(created) == 1
+    src = created[0]["src"]
+    assert [r["metadata"]["key"] for r in src] == ["p1__s0", "p1__s1", "p2__s0", "p2__s1"]
+    assert src[0]["contents"] == "prompt1"
+    assert src[0]["config"] == a._config("sys", params)
+    assert created[0]["model"] == "gemini-2.5-flash"
+
+
+async def test_batch_poll_running_then_results():
+    a = _adapter()
+    params = CallParams(temperature=1.0, max_output_tokens=16, n=2)
+    bid = await a.submit_batch([("p1", "x", None, params), ("p2", "y", None, params)])
+    assert await a.poll_batch(bid) is None
+    job = a._client.aio.batches.jobs[bid]
+    job.state = NS(name="JOB_STATE_SUCCEEDED")
+    job.dest = NS(inlined_responses=[
+        NS(response=_resp("Land"), metadata={"key": "p1__s0"}, error=None),
+        # metadata missing: falls back to submit order (index 1 -> p1__s1)
+        NS(response=_resp("Water"), metadata=None, error=None),
+        NS(response=None, metadata={"key": "p2__s0"}, error=NS(code=500, message="boom")),
+        NS(response=_resp("Land"), metadata={"key": "p2__s1"}, error=None),
+    ])
+    out = await a.poll_batch(bid)
+    assert out["p1"].texts == ["Land", "Water"] and out["p1"].error is None
+    assert out["p1"].usage.input_tokens == 96
+    assert out["p2"].texts == ["Land"]
+    assert "1/2 batch samples failed" in out["p2"].error and "boom" in out["p2"].error
+
+
+async def test_batch_job_failure_marks_known_items():
+    a = _adapter()
+    bid = await a.submit_batch([("p7", "x", None, CallParams(temperature=None,
+                                                             max_output_tokens=4))])
+    job = a._client.aio.batches.jobs[bid]
+    job.state = NS(name="JOB_STATE_EXPIRED")
+    out = await a.poll_batch(bid)
+    assert out["p7"].error and "JOB_STATE_EXPIRED" in out["p7"].error
+
+
+async def test_batch_splits_large_submissions(monkeypatch):
+    import blindearth.providers.google as g
+
+    monkeypatch.setattr(g, "INLINE_BATCH_MAX_BYTES", 400)
+    a = _adapter()
+    p = CallParams(temperature=None, max_output_tokens=4)
+    bid = await a.submit_batch([(f"p{i}", "x" * 150, None, p) for i in range(4)])
+    names = bid.split(",")
+    assert len(names) > 1
+    for n in names[:-1]:
+        a._client.aio.batches.jobs[n].state = NS(name="JOB_STATE_SUCCEEDED")
+    assert await a.poll_batch(bid) is None  # last job still pending
+
+
+def test_vertex_has_no_batch():
+    vprov = ProviderSpec(id="vx", kind="google", extra={"vertexai": True})
+    a = _adapter(prov=vprov)
+    assert not a.supports_batch and not a.default_capabilities().supports_batch
 
 
 def test_effort_mapping_table():
