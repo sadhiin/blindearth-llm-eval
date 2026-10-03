@@ -1,0 +1,19 @@
+# Smoke test: 4 degree grid (4,050 points), seeded 10% subset (405 points).
+# Check a setup with this before spending on a full 2 degree run.
+name: smoke-4deg-10pct
+budget_usd: 2.0
+eval:
+  mask: natural-earth-land
+  truth_rule: cell_center
+  grid: { step_deg: 4, placement: cell_center, subset_frac: 0.1, seed: 0 }
+  coord_format: hemisphere
+  prompt: default-land-water
+extraction:
+  mode: auto
+  n_samples: 4
+  temperature: 1.0
+matrix:
+  - model: anthropic/opus-5-5
+    configs: [ { effort: off } ]
+  - model: my-vllm/qwen-local
+    configs: [ {} ]

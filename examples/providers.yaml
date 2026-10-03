@@ -1,0 +1,99 @@
+# Provider and model registry (blindearth run spec.yaml --registry examples/providers.yaml).
+# Keys are read from the env var named by api_key_env, then from the OS keychain
+# (service "blindearth", username = provider id). Never put a key in this file.
+# Unknown keys on a provider or model are kept in its `extra` (e.g. effort_map, timeout_s).
+
+providers:
+  - id: anthropic
+    kind: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+    use_batch: false            # true = Message Batches API (about half price, hours of latency)
+
+  - id: openai
+    kind: openai
+    api_key_env: OPENAI_API_KEY
+
+  - id: google
+    kind: google
+    api_key_env: GEMINI_API_KEY
+
+  - id: openrouter
+    kind: openrouter
+    api_key_env: OPENROUTER_API_KEY
+
+  - id: my-vllm                 # self-hosted vLLM: `vllm serve Qwen/Qwen2.5-7B-Instruct-AWQ`
+    kind: openai_compatible
+    base_url: http://localhost:8000/v1
+    api_key_env: VLLM_KEY       # optional; leave the variable unset for an open server
+
+  - id: ollama
+    kind: ollama
+    base_url: http://localhost:11434/v1
+
+  - id: llamacpp
+    kind: llamacpp
+    base_url: http://localhost:8080/v1
+
+  - id: hf-local
+    kind: transformers
+
+models:
+  # Anthropic
+  - id: opus-5-5
+    provider: anthropic
+    name: claude-opus-5-5
+    forced_thinking: true       # thinking cannot be disabled on this model
+  - id: sonnet-5-5
+    provider: anthropic
+    name: claude-sonnet-5-5
+  - id: haiku-4-5
+    provider: anthropic
+    name: claude-haiku-4-5
+
+  # OpenAI
+  - id: gpt-4-1-mini
+    provider: openai
+    name: gpt-4.1-mini          # chat model: logprobs available
+  - id: gpt-5-1
+    provider: openai
+    name: gpt-5.1               # reasoning model: logprobs only at effort=off
+
+  # Google
+  - id: gemini-2-5-flash
+    provider: google
+    name: gemini-2.5-flash
+
+  # OpenRouter (any routed model)
+  - id: llama-3-3-70b-or
+    provider: openrouter
+    name: meta-llama/llama-3.3-70b-instruct
+    vendor: meta
+
+  # Self-hosted vLLM
+  - id: qwen-local
+    provider: my-vllm
+    name: Qwen/Qwen2.5-7B-Instruct
+    quant: awq-int4
+    vendor: alibaba
+
+  # Ollama
+  - id: llama3-2-3b-ollama
+    provider: ollama
+    name: llama3.2:3b
+    quant: q4_K_M
+    vendor: meta
+
+  # llama.cpp server (model is whatever the server loaded; name is informational)
+  - id: qwen3-4b-llamacpp
+    provider: llamacpp
+    name: qwen3-4b-instruct
+    quant: q8_0
+    vendor: alibaba
+
+  # Hugging Face transformers in-process (exact first-token probabilities)
+  - id: qwen2-5-0-5b-hf
+    provider: hf-local
+    name: Qwen/Qwen2.5-0.5B-Instruct
+    quant: bf16
+    vendor: alibaba
+    device: cpu                 # or cuda / mps; omit to auto-detect

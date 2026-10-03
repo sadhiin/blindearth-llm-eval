@@ -1,0 +1,512 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blind Earth Report</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --surface-2: #f0efec;
+  --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+  --accent: #2a78d6; --good: #006300; --warn-bg: #fff4d6; --warn-ink: #6b4a00;
+  --chip: #e8e7e2; --map-card: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --surface-2: #232321;
+    --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+    --accent: #3987e5; --good: #0ca30c; --warn-bg: #3a2f12; --warn-ink: #f3d58a;
+    --chip: #2c2c2a; --map-card: #ffffff;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --surface-2: #232321;
+  --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+  --accent: #3987e5; --good: #0ca30c; --warn-bg: #3a2f12; --warn-ink: #f3d58a;
+  --chip: #2c2c2a; --map-card: #ffffff;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--page); color: var(--ink); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+a { color: var(--accent); }
+header.top { background: var(--surface); border-bottom: 1px solid var(--border); padding: 20px 16px 12px; }
+.wrap { max-width: 1280px; margin: 0 auto; padding: 0 16px; }
+h1 { font-size: 24px; margin: 0 0 4px; }
+h2 { font-size: 19px; margin: 0 0 4px; }
+.q { color: var(--ink-2); margin: 0 0 12px; font-style: italic; }
+nav.toc { position: sticky; top: 0; z-index: 5; background: var(--surface); border-bottom: 1px solid var(--border); }
+nav.toc .wrap { display: flex; gap: 14px; overflow-x: auto; padding: 8px 16px; white-space: nowrap; }
+nav.toc a { color: var(--ink-2); text-decoration: none; font-size: 13px; }
+nav.toc a:hover { color: var(--ink); }
+section.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 18px; margin: 18px 0; }
+dl.meta { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; margin: 10px 0 0; font-size: 13px; }
+dl.meta dt { color: var(--ink-2); }
+dl.meta dd { margin: 0; overflow-wrap: anywhere; }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.warn { background: var(--warn-bg); color: var(--warn-ink); border-radius: 8px; padding: 8px 12px; margin: 8px 0; font-size: 13px; }
+.controls { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; margin: 8px 0 12px; font-size: 13px; }
+.controls label { display: inline-flex; gap: 6px; align-items: center; }
+select, button { font: inherit; color: var(--ink); background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; }
+button { cursor: pointer; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; background: transparent; padding: 5px 12px; }
+.seg button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+.mapbox { background: var(--map-card); border-radius: 8px; padding: 6px; }
+.mapbox img { width: 100%; height: auto; display: block; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { padding: 6px 8px; border-bottom: 1px solid var(--grid); text-align: right; white-space: nowrap; }
+th { color: var(--ink-2); font-weight: 600; position: sticky; top: 0; background: var(--surface); }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--ink); }
+th[aria-sort="ascending"]::after { content: " ▲"; font-size: 10px; }
+th[aria-sort="descending"]::after { content: " ▼"; font-size: 10px; }
+th.nosort { color: var(--muted); }
+td.l, th.l { text-align: left; }
+td.num { font-variant-numeric: tabular-nums; }
+tr:hover td { background: var(--surface-2); }
+.chip { display: inline-block; background: var(--chip); color: var(--ink-2); border-radius: 10px; padding: 0 7px; font-size: 11px; margin-left: 4px; }
+.chip.flag { background: var(--warn-bg); color: var(--warn-ink); }
+.ci { color: var(--ink-2); font-size: 12px; }
+.star { color: #c98500; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+.ecard h3 { font-size: 13px; margin: 0 0 6px; font-weight: 600; }
+.ecard .stats { font-size: 12px; color: var(--ink-2); margin-top: 4px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--ink-2); margin: 6px 0; }
+.sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; border: 1px solid var(--border); vertical-align: -2px; margin-right: 5px; }
+.diffrow { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.diffbig { margin-top: 12px; }
+.statline { font-size: 15px; margin: 10px 0 4px; }
+.note { color: var(--ink-2); font-size: 12px; margin: 6px 0; }
+.empty { color: var(--muted); font-style: italic; padding: 10px 0; }
+footer { color: var(--ink-2); font-size: 13px; padding: 10px 16px 40px; }
+footer li { margin: 4px 0; }
+.themebtn { float: right; }
+td.heat { text-align: center; min-width: 64px; }
+@media (max-width: 700px) {
+  .diffrow { grid-template-columns: 1fr; }
+  dl.meta { grid-template-columns: 1fr; }
+  dl.meta dt { margin-top: 6px; }
+  section.card { padding: 12px; }
+}
+@media print { nav.toc, .themebtn { display: none; } }
+</style>
+<script>{{ plotly_js | safe }}</script>
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <button class="themebtn" id="themebtn" type="button" title="Switch light / dark">Theme</button>
+    <h1>{{ h.name }}</h1>
+    <div class="q">Blind Earth eval: {{ h.n_runs }} run{{ "s" if h.n_runs != 1 }} · “Land or Water?” per grid cell, scored against a land mask, area-weighted</div>
+    <dl class="meta">
+      <dt>Eval spec</dt><dd><span class="mono">{{ h.spec_id[:16] if h.spec_id }}</span> · grid {{ h.grid }} · {{ h.subset }} · coords {{ h.coord_format }} · truth rule {{ h.truth_rule | replace("_", " ") }}</dd>
+      <dt>Prompt</dt><dd><code>{{ h.prompt }}</code>{% if h.prompt_id %} <span class="chip">{{ h.prompt_id }}</span>{% endif %}</dd>
+      {% if h.system_prompt %}<dt>System prompt</dt><dd><code>{{ h.system_prompt }}</code></dd>{% endif %}
+      <dt>Mask</dt><dd>{{ h.mask_source }} <span class="chip">{{ h.mask_id }}</span> · {{ h.mask_shape }} px · hash <span class="mono">{{ h.mask_hash[:16] if h.mask_hash }}</span></dd>
+      <dt>Extraction</dt><dd>{{ h.modes }}{% if h.mixed_modes %} <span class="chip flag">mixed modes</span>{% endif %} · threshold P(Land) &gt; {{ h.threshold }}</dd>
+      <dt>Run dates</dt><dd>{{ h.run_dates }}</dd>
+      <dt>Runner version</dt><dd>{{ h.runner_versions }}</dd>
+      <dt>Total spend</dt><dd>{{ h.total_spend }}{% if h.spend_note %} <span class="ci">({{ h.spend_note }})</span>{% endif %}</dd>
+      <dt>Generated</dt><dd>{{ h.generated_at }} · blindearth {{ h.report_version }}</dd>
+    </dl>
+    {% for w in h.warnings %}<div class="warn">{{ w }}</div>{% endfor %}
+  </div>
+</header>
+<nav class="toc" aria-label="Sections"><div class="wrap">
+  <a href="#maps">Map grid</a><a href="#errors">Error map</a><a href="#leaderboard">Leaderboard</a>
+  <a href="#effort">Effort</a><a href="#cost">Cost vs accuracy</a><a href="#lineage">Lineage</a>
+  <a href="#diff">Diff</a><a href="#regions">Regions</a><a href="#calibration">Calibration</a>
+  <a href="#health">Run health</a><a href="#caveats">Caveats</a>
+</div></nav>
+
+<main class="wrap">
+
+<section class="card" id="maps">
+  <h2>Map grid</h2>
+  <p class="q">Who sees the Earth best?</p>
+  <div class="controls">
+    <div class="seg" role="group" aria-label="Map mode">
+      <button type="button" data-mode="binary" aria-pressed="true">Binary</button>
+      <button type="button" data-mode="probability" aria-pressed="false">Probability</button>
+      <button type="button" data-mode="error" aria-pressed="false">Error</button>
+    </div>
+    <label><input type="checkbox" id="coast"> True coastline overlay</label>
+    {% if any_forced %}<span class="note"><span class="star">★</span> forced thinking</span>{% endif %}
+  </div>
+  <div class="mapbox"><img id="mapgrid" alt="Map grid, one map per run" src="{{ maps.binary.plain }}"></div>
+</section>
+
+<section class="card" id="errors">
+  <h2>Error map</h2>
+  <p class="q">Where and how does each model fail?</p>
+  <div class="legend">
+    {% for lab, c in error_legend %}<span><span class="sw" style="background: {{ rgb(c) }}"></span>{{ lab }}</span>{% endfor %}
+  </div>
+  {{ figs.errors | safe }}
+  <div class="grid2">
+    {% for c in error_cards %}
+    <div class="ecard">
+      <h3>{{ c.label }}{% if c.forced %} <span class="star">★</span>{% endif %}</h3>
+      <div class="mapbox"><img src="{{ c.img }}" alt="Error map for {{ c.label }}" loading="lazy"></div>
+      <div class="stats">False Land {{ c.false_land | pct(2) }} ({{ c.n_false_land | int }} cells) · False Water {{ c.false_water | pct(2) }} ({{ c.n_false_water | int }}) · Invalid {{ c.invalid | pct(2) }} ({{ c.n_invalid | int }}) <span class="ci">· shares of area</span></div>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="card" id="leaderboard">
+  <h2>Leaderboard</h2>
+  <p class="q">Which is best, and is the gap real?</p>
+  {% if mixed %}<div class="warn">Extraction modes differ across runs. Rows are ranked on thresholded area-weighted accuracy only; probability metrics (Brier, ECE) are hidden and not sortable.</div>{% endif %}
+  <div class="controls" id="lbfilters">
+    <label>Vendor <select data-filter="vendor"><option value="">All</option>{% for v in vendors %}<option>{{ v }}</option>{% endfor %}</select></label>
+    <label>Thinking <select data-filter="thinking"><option value="">All</option><option value="1">On</option><option value="0">Off</option></select></label>
+    <label>Extraction <select data-filter="mode"><option value="">All</option>{% for m in modes %}<option>{{ m }}</option>{% endfor %}</select></label>
+    {% if any_forced %}<label>Forced thinking <select data-filter="forced"><option value="">Include</option><option value="0">Exclude</option><option value="1">Only (separate board)</option></select></label>{% endif %}
+  </div>
+  <div class="tablewrap">
+  <table id="lb">
+    <thead><tr>
+      <th class="sortable" data-type="num">Rank</th>
+      <th class="sortable l" data-type="str">Run</th>
+      <th class="sortable l" data-type="str">Vendor</th>
+      <th class="sortable l" data-type="str">Mode</th>
+      <th class="sortable num" data-type="num" aria-sort="descending" title="Area-weighted accuracy, invalid counted wrong; 95% block-bootstrap interval">Accuracy (area) · 95% CI</th>
+      <th class="sortable" data-type="num" title="Accuracy on valid answers only">Valid-only</th>
+      <th class="sortable" data-type="num" title="(acc − baseline) / (1 − baseline)">Skill</th>
+      <th class="sortable" data-type="num">Land F1</th>
+      <th class="sortable" data-type="num">Invalid</th>
+      <th class="{{ 'nosort' if mixed else 'sortable' }}" data-type="num" title="{{ 'Not compared: mixed extraction modes' if mixed else 'Brier score on P(Land); probabilistic runs only' }}">Brier</th>
+      <th class="{{ 'nosort' if mixed else 'sortable' }}" data-type="num" title="{{ 'Not compared: mixed extraction modes' if mixed else 'Expected calibration error' }}">ECE</th>
+      <th class="sortable" data-type="num">Cost</th>
+      <th class="sortable" data-type="num">Latency p50</th>
+      <th class="sortable" data-type="num">p95</th>
+      <th class="sortable" data-type="num">Points</th>
+    </tr></thead>
+    <tbody>
+    {% for r in leaderboard %}
+    <tr data-vendor="{{ r.vendor }}" data-thinking="{{ 1 if r.thinking else 0 }}" data-mode="{{ r.mode }}" data-forced="{{ 1 if r.forced else 0 }}">
+      <td class="num" data-v="{{ r.rank }}">{{ r.rank_label }}{% if r.tied %} <span class="chip" title="{{ r.tie_note }}">tie</span>{% endif %}</td>
+      <td class="l" data-v="{{ r.label }}" title="{{ r.model }}{% if r.resolved %} → {{ r.resolved }}{% endif %}">{{ r.label }}{% if r.forced %} <span class="star" title="forced thinking">★</span>{% elif r.thinking %} <span class="chip">thinking</span>{% endif %}{% if r.status != 'complete' %} <span class="chip flag">{{ r.status }}</span>{% endif %}</td>
+      <td class="l" data-v="{{ r.vendor }}">{{ r.vendor }}</td>
+      <td class="l" data-v="{{ r.mode }}">{{ r.mode }}{% if r.mixed_flag %} <span class="chip flag" title="Mixed-mode comparison: ranked on thresholded accuracy only">mixed</span>{% endif %}</td>
+      <td class="num" data-v="{{ r.acc | sv }}"><b>{{ r.acc | pct }}</b> <span class="ci">[{{ r.lo | pct }}, {{ r.hi | pct }}]</span></td>
+      <td class="num" data-v="{{ r.acc_valid | sv }}">{{ r.acc_valid | pct }}</td>
+      <td class="num" data-v="{{ r.skill | sv }}">{{ r.skill | num(3) }}</td>
+      <td class="num" data-v="{{ r.f1 | sv }}">{{ r.f1 | num(3) }}</td>
+      <td class="num" data-v="{{ r.invalid | sv }}">{{ r.invalid | pct(2) }}</td>
+      <td class="num" data-v="{{ r.brier | sv }}">{{ r.brier | num(4) }}</td>
+      <td class="num" data-v="{{ r.ece | sv }}">{{ r.ece | num(4) }}</td>
+      <td class="num" data-v="{{ r.cost | sv }}">{{ r.cost | usd }}</td>
+      <td class="num" data-v="{{ r.p50 | sv }}">{{ r.p50 | secs }}</td>
+      <td class="num" data-v="{{ r.p95 | sv }}">{{ r.p95 | secs }}</td>
+      <td class="num" data-v="{{ r.n_done }}">{{ r.n_done | int }}{% if r.n_done != r.n_total %} / {{ r.n_total | int }}{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="note">Ranks follow area-weighted accuracy. “=n” and <span class="chip">tie</span> mark runs whose block-bootstrap paired-difference interval against the group leader includes zero; hover the chip for the interval.</p>
+</section>
+
+<section class="card" id="effort">
+  <h2>Effort curve</h2>
+  <p class="q">Does more thinking help?</p>
+  {% if figs.effort %}{{ figs.effort | safe }}{% else %}<div class="empty">No model in this comparison was run at two or more effort levels.</div>{% endif %}
+</section>
+
+<section class="card" id="cost">
+  <h2>Cost vs accuracy</h2>
+  <p class="q">What do I pay for each point of accuracy?</p>
+  {% if figs.cost %}{{ figs.cost | safe }}<p class="note">Larger markers sit on the Pareto frontier (dotted line): no other run is both cheaper and more accurate. Stars are thinking runs.</p>{% else %}<div class="empty">No run has a recorded cost.</div>{% endif %}
+</section>
+
+<section class="card" id="lineage">
+  <h2>Lineage</h2>
+  <p class="q">Do newer models know more geography?</p>
+  {% if figs.lineage %}{{ figs.lineage | safe }}<p class="note">One line per vendor through each model's best run; every run is a marker.</p>{% else %}<div class="empty">No model has a release date in the registry.</div>{% endif %}
+</section>
+
+<section class="card" id="diff">
+  <h2>Diff view</h2>
+  <p class="q">Where do A and B differ, and by how much?</p>
+  {% if diff_note %}<p class="note">{{ diff_note }}</p>{% endif %}
+  <div class="controls">
+    <label>A <select id="diffA"></select></label>
+    <label>B <select id="diffB"></select></label>
+  </div>
+  <div id="diffbody">
+    <div class="statline" id="diffstat"></div>
+    <div class="diffrow">
+      <div><div class="note" id="diffAlab"></div><div class="mapbox"><img id="diffAimg" alt="Run A map"></div></div>
+      <div><div class="note" id="diffBlab"></div><div class="mapbox"><img id="diffBimg" alt="Run B map"></div></div>
+    </div>
+    <div class="diffbig">
+      <div class="legend" id="difflegend"></div>
+      <div class="mapbox"><img id="diffimg" alt="Disagreement map"></div>
+    </div>
+  </div>
+  <script type="application/json" id="diffdata">{{ diff_json | safe }}</script>
+</section>
+
+<section class="card" id="regions">
+  <h2>Region table</h2>
+  <p class="q">What does the headline number hide?</p>
+  {% if regions.cols %}
+  <div class="tablewrap">
+  <table id="regtable">
+    <thead><tr><th class="l sortable" data-type="str">Run</th><th class="sortable" data-type="num">Overall</th>{% for c in regions.cols %}<th class="sortable" data-type="num">{{ c | replace("_", " ") }}</th>{% endfor %}</tr></thead>
+    <tbody>
+    {% for r in regions.rows %}
+      <tr><td class="l" data-v="{{ r.label }}">{{ r.label }}{% if r.forced %} <span class="star">★</span>{% endif %}</td><td class="num" data-v="{{ r.acc | sv }}">{{ r.acc | pct }}</td>{% for c in r.cells %}<td class="heat num" data-v="{{ c.v }}" style="background: {{ c.bg }}; color: {{ c.fg }}">{{ c.text }}</td>{% endfor %}</tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <div class="legend"><span>{{ regions.lo | pct }}</span>{% for c in regions.legend %}<span class="sw" style="background: {{ c }}"></span>{% endfor %}<span>{{ regions.hi | pct }}</span><span class="note">Area-weighted accuracy per region; Antarctica is separate because mask conventions differ.</span></div>
+  {% else %}<div class="empty">No region scores available.</div>{% endif %}
+</section>
+
+<section class="card" id="calibration">
+  <h2>Calibration</h2>
+  <p class="q">Is the model's confidence meaningful?</p>
+  {% if figs.calibration %}{{ figs.calibration | safe }}<p class="note">Reliability diagram: area-weighted observed land share per P(Land) bin; marker size grows with cell count. Only runs with real probabilities (logprobs, or sampling with more than one sample) are shown.{% if mixed %} Modes differ, so compare curves within one mode.{% endif %}</p>{% else %}<div class="empty">No run in this comparison has probabilities (greedy or single-sample runs only).</div>{% endif %}
+</section>
+
+<section class="card" id="health">
+  <h2>Run health</h2>
+  <p class="q">Can I trust this run?</p>
+  <div class="tablewrap">
+  <table id="healthtable">
+    <thead><tr>
+      <th class="l sortable" data-type="str">Run</th><th class="l sortable" data-type="str">Status</th>
+      <th class="sortable" data-type="num">Points</th><th class="sortable" data-type="num">Invalid rate</th>
+      <th class="sortable" data-type="num">Invalid</th><th class="sortable" data-type="num">Errors</th>
+      <th class="sortable" data-type="num" title="finish reason = length / max tokens">Truncated</th>
+      <th class="sortable" data-type="num" title="Share of points with validity mass &lt; 0.5 (logprobs runs)">Low mass</th>
+      <th class="sortable" data-type="num">p50</th><th class="sortable" data-type="num">p95</th>
+      <th class="sortable" data-type="num">Input tok</th><th class="sortable" data-type="num">Output tok</th><th class="sortable" data-type="num">Thinking tok</th>
+      <th class="sortable" data-type="num">Cost</th>
+      <th class="l sortable" data-type="str">Started</th><th class="l sortable" data-type="str">Resolved version</th><th class="l" >Most common error</th>
+    </tr></thead>
+    <tbody>
+    {% for r in health %}
+      <tr>
+        <td class="l" data-v="{{ r.label }}">{{ r.label }}</td>
+        <td class="l" data-v="{{ r.status }}">{{ r.status }}</td>
+        <td class="num" data-v="{{ r.done }}">{{ r.done | int }}{% if r.done != r.total %} / {{ r.total | int }}{% endif %}</td>
+        <td class="num" data-v="{{ r.invalid_rate | sv }}">{{ r.invalid_rate | pct(2) }}</td>
+        <td class="num" data-v="{{ r.n_invalid }}">{{ r.n_invalid | int }}</td>
+        <td class="num" data-v="{{ r.n_errors }}">{{ r.n_errors | int }}</td>
+        <td class="num" data-v="{{ r.n_truncated }}">{{ r.n_truncated | int }}</td>
+        <td class="num" data-v="{{ r.low_mass | sv }}">{{ r.low_mass | pct(2) }}</td>
+        <td class="num" data-v="{{ r.p50 | sv }}">{{ r.p50 | secs }}</td>
+        <td class="num" data-v="{{ r.p95 | sv }}">{{ r.p95 | secs }}</td>
+        <td class="num" data-v="{{ r.in_tok | sv }}">{{ r.in_tok | int }}</td>
+        <td class="num" data-v="{{ r.out_tok | sv }}">{{ r.out_tok | int }}</td>
+        <td class="num" data-v="{{ r.think_tok | sv }}">{{ r.think_tok | int }}</td>
+        <td class="num" data-v="{{ r.cost | sv }}">{{ r.cost | usd }}</td>
+        <td class="l" data-v="{{ r.started }}">{{ r.started or "—" }}</td>
+        <td class="l mono" data-v="{{ r.resolved }}">{{ r.resolved }}</td>
+        <td class="l mono" title="{{ r.top_error }}">{{ r.top_error[:40] if r.top_error else "—" }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="note">Errors are points that still failed after retries (5 attempts with backoff); individual retry counts are not stored per point.</p>
+  {% if figs.latency %}{{ figs.latency | safe }}{% else %}<div class="empty">No latency data.</div>{% endif %}
+</section>
+</main>
+
+<footer id="caveats"><div class="wrap">
+  <h2>Validity caveats</h2>
+  <ul>{% for c in caveats %}<li>{{ c }}</li>{% endfor %}</ul>
+</div></footer>
+
+<script>
+(function () {
+  "use strict";
+  var MAPS = {{ maps | tojson }};
+  var PAL = {{ palette | tojson }};
+  var CHROME = {
+    light: {ink: "#0b0b0b", muted: "#898781", grid: "#e1e0d9", axis: "#c3c2b7", ring: "rgba(252,252,251,0.9)"},
+    dark: {ink: "#ffffff", muted: "#898781", grid: "#2c2c2a", axis: "#383835", ring: "rgba(26,26,25,0.9)"}
+  };
+  var OVERFLOW = "#898781";
+  var root = document.documentElement;
+
+  /* ---------- theme ---------- */
+  function theme() {
+    var t = root.getAttribute("data-theme");
+    if (t === "light" || t === "dark") return t;
+    return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+  function colourFor(meta, th) {
+    meta = meta || {};
+    if (meta.fixed) return meta.fixed;
+    if (meta.slot === "ink") return CHROME[th].ink;
+    if (meta.slot === "muted") return CHROME[th].muted;
+    if (meta.slot === null || meta.slot === undefined) return OVERFLOW;
+    return PAL[th][meta.slot];
+  }
+  function restylePlots() {
+    if (!window.Plotly) return;
+    var th = theme(), c = CHROME[th];
+    document.querySelectorAll(".js-plotly-plot").forEach(function (gd) {
+      (gd.data || []).forEach(function (tr, k) {
+        if (tr.meta && tr.meta.fixed) return;
+        var col = colourFor(tr.meta, th);
+        var upd = {"marker.color": col};
+        if (tr.type === "scatter" || tr.type === undefined) {
+          upd["line.color"] = col;
+          upd["error_y.color"] = col;
+          upd["marker.line.color"] = c.ring;
+        }
+        Plotly.restyle(gd, upd, [k]);
+      });
+      Plotly.relayout(gd, {
+        "font.color": c.ink,
+        "xaxis.gridcolor": c.grid, "yaxis.gridcolor": c.grid,
+        "xaxis.linecolor": c.axis, "yaxis.linecolor": c.axis
+      });
+    });
+  }
+  try { var saved = localStorage.getItem("be-theme"); if (saved) root.setAttribute("data-theme", saved); } catch (e) {}
+  document.getElementById("themebtn").addEventListener("click", function () {
+    var next = theme() === "dark" ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem("be-theme", next); } catch (e) {}
+    restylePlots();
+  });
+  if (window.matchMedia) {
+    var mq = window.matchMedia("(prefers-color-scheme: dark)");
+    if (mq.addEventListener) mq.addEventListener("change", restylePlots);
+  }
+  window.addEventListener("load", restylePlots);
+
+  /* ---------- map grid toggles ---------- */
+  var mapMode = "binary";
+  var coast = document.getElementById("coast");
+  function showMap() {
+    document.getElementById("mapgrid").src = MAPS[mapMode][coast.checked ? "coast" : "plain"];
+  }
+  document.querySelectorAll("#maps .seg button").forEach(function (b) {
+    b.addEventListener("click", function () {
+      mapMode = b.getAttribute("data-mode");
+      document.querySelectorAll("#maps .seg button").forEach(function (o) { o.setAttribute("aria-pressed", o === b ? "true" : "false"); });
+      showMap();
+    });
+  });
+  coast.addEventListener("change", showMap);
+
+  /* ---------- sortable tables ---------- */
+  function makeSortable(table) {
+    if (!table) return;
+    var ths = table.querySelectorAll("thead th");
+    ths.forEach(function (th, col) {
+      if (!th.classList.contains("sortable")) return;
+      th.addEventListener("click", function () {
+        var asc = th.getAttribute("aria-sort") !== "ascending";
+        ths.forEach(function (o) { o.removeAttribute("aria-sort"); });
+        th.setAttribute("aria-sort", asc ? "ascending" : "descending");
+        var num = th.getAttribute("data-type") === "num";
+        var tbody = table.tBodies[0];
+        var rows = Array.prototype.slice.call(tbody.rows);
+        rows.sort(function (a, b) {
+          var x = a.cells[col].getAttribute("data-v"), y = b.cells[col].getAttribute("data-v");
+          if (num) {
+            var xe = x === null || x === "", ye = y === null || y === "";
+            if (xe && ye) return 0; if (xe) return 1; if (ye) return -1;
+            return asc ? parseFloat(x) - parseFloat(y) : parseFloat(y) - parseFloat(x);
+          }
+          x = (x || "").toLowerCase(); y = (y || "").toLowerCase();
+          return asc ? x.localeCompare(y) : y.localeCompare(x);
+        });
+        rows.forEach(function (r) { tbody.appendChild(r); });
+      });
+    });
+  }
+  makeSortable(document.getElementById("lb"));
+  makeSortable(document.getElementById("regtable"));
+  makeSortable(document.getElementById("healthtable"));
+
+  /* ---------- leaderboard filters ---------- */
+  var filters = document.querySelectorAll("#lbfilters select");
+  function applyFilters() {
+    var want = {};
+    filters.forEach(function (s) { want[s.getAttribute("data-filter")] = s.value; });
+    document.querySelectorAll("#lb tbody tr").forEach(function (tr) {
+      var ok = true;
+      for (var k in want) { if (want[k] !== "" && tr.getAttribute("data-" + k) !== want[k]) ok = false; }
+      tr.style.display = ok ? "" : "none";
+    });
+  }
+  filters.forEach(function (s) { s.addEventListener("change", applyFilters); });
+
+  /* ---------- diff view ---------- */
+  var DIFF = JSON.parse(document.getElementById("diffdata").textContent);
+  var LEG = {{ diff_legend | tojson }};
+  var selA = document.getElementById("diffA"), selB = document.getElementById("diffB");
+  function byI(i) { for (var k = 0; k < DIFF.runs.length; k++) if (DIFF.runs[k].i === i) return DIFF.runs[k]; return null; }
+  function rgb(c) { return "rgb(" + c[0] + "," + c[1] + "," + c[2] + ")"; }
+  function pp(x) { return (x >= 0 ? "+" : "") + (x * 100).toFixed(2); }
+  function esc(s) { var d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
+  function showDiff() {
+    var a = parseInt(selA.value, 10), b = parseInt(selB.value, 10);
+    var stat = document.getElementById("diffstat");
+    var ra = byI(a), rb = byI(b);
+    if (!ra || !rb) return;
+    document.getElementById("diffAimg").src = ra.img;
+    document.getElementById("diffBimg").src = rb.img;
+    document.getElementById("diffAlab").textContent = "A: " + ra.label;
+    document.getElementById("diffBlab").textContent = "B: " + rb.label;
+    if (a === b) {
+      stat.textContent = "Pick two different runs.";
+      document.getElementById("diffimg").removeAttribute("src");
+      document.getElementById("difflegend").innerHTML = "";
+      return;
+    }
+    var lo = Math.min(a, b), hi = Math.max(a, b), flip = a > b;
+    var p = DIFF.pairs[lo + "-" + hi];
+    document.getElementById("diffimg").src = p.img;
+    var first = byI(lo).label, second = byI(hi).label;
+    var labels = [LEG[0][0], LEG[1][0], "Only " + first + " correct", "Only " + second + " correct", LEG[4][0]];
+    document.getElementById("difflegend").innerHTML = LEG.map(function (e, k) {
+      return '<span><span class="sw" style="background:' + rgb(e[1]) + '"></span>' + esc(labels[k]) + "</span>";
+    }).join("");
+    if (p.diff === null) {
+      stat.textContent = "Paired difference unavailable" + (p.error ? ": " + p.error : ".");
+      return;
+    }
+    var d = flip ? -p.diff : p.diff, l = flip ? -p.hi : p.lo, h = flip ? -p.lo : p.hi;
+    stat.innerHTML = "<b>A − B = " + pp(d) + " pp</b> <span class='ci'>95% paired block-bootstrap interval [" + pp(l) + ", " + pp(h) + "]</span> " +
+      (p.significant ? "<span class='chip'>different</span>" : "<span class='chip'>tie: interval includes 0</span>") +
+      "<div class='note'>Disagree on " + p.n_disagree.toLocaleString() + " of " + p.n_both.toLocaleString() + " cells (" +
+      (p.share_disagree_area * 100).toFixed(2) + "% of area); " + p.n_paired.toLocaleString() + " paired points.</div>";
+  }
+  DIFF.runs.forEach(function (r, k) {
+    [selA, selB].forEach(function (s) {
+      var o = document.createElement("option"); o.value = r.i;
+      o.textContent = r.label + " (" + (r.acc * 100).toFixed(1) + "%)"; s.appendChild(o);
+    });
+  });
+  if (DIFF.runs.length >= 2) {
+    var sorted = DIFF.runs.slice().sort(function (x, y) { return y.acc - x.acc; });
+    selA.value = sorted[0].i; selB.value = sorted[1].i;
+    selA.addEventListener("change", showDiff); selB.addEventListener("change", showDiff);
+    showDiff();
+  } else {
+    document.getElementById("diffbody").innerHTML = "<div class='empty'>The diff view needs at least two runs.</div>";
+  }
+})();
+</script>
+</body>
+</html>

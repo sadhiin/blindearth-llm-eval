@@ -1,0 +1,21 @@
+# The product spec's two-level matrix example.
+# Model refs are "<provider id>/<model id>" from the registry file (providers.yaml);
+# replace openai/gpt-model with a model id you registered.
+name: spec-example-2deg
+eval:
+  mask: natural-earth-land
+  truth_rule: cell_center
+  grid: { step_deg: 2, placement: cell_center }
+  coord_format: hemisphere
+  prompt: default-land-water
+extraction:
+  mode: auto            # logprobs if supported, else sample
+  n_samples: 4
+  temperature: 1.0
+matrix:
+  - model: anthropic/opus-5-5
+    configs: [ { effort: low }, { effort: high } ]
+  - model: openai/gpt-model
+    configs: [ { effort: off } ]
+  - model: my-vllm/qwen-local
+    configs: [ {} ]
