@@ -1,6 +1,32 @@
-"""Region labels (continent, ocean, polar band) for region accuracy.
+"""Region labels (continent, ocean) for region accuracy.
 
-Self-contained approximation, no downloads and no polygon data. Each point is labelled from its
+Two methods; the one used is recorded (``region_labels_with_method``, ``RegionAccuracy.method``)
+so reports can show it.
+
+**Natural Earth polygons** (``method == "natural-earth-110m"``, preferred). Two Natural Earth
+1:110m physical layers are downloaded once into the mask cache dir (``<cache>/downloads``, see
+``blindearth.evalspec.masks``) and indexed with a shapely STRtree:
+
+- land: ``ne_110m_geography_regions_polys`` — every feature has a ``REGION`` field (Africa,
+  Antarctica, Asia, Europe, North America, Oceania, South America). Where features overlap,
+  ``FEATURECLA == "Continent"`` wins, then the smallest polygon.
+- water: ``ne_110m_geography_marine_polys`` — oceans and major seas by ``name``, grouped to
+  Atlantic / Pacific / Indian / Arctic / Southern Ocean, ``"Mediterranean & Black Sea"`` and
+  ``"Inland waters"`` (Caspian). Baffin Bay, Hudson Bay and the Beaufort Sea count as Arctic
+  (IHO S-23); Weddell and Ross seas as Southern Ocean. Where features overlap the smallest wins.
+
+Each point is labelled by its *true* class: land points against land polygons, water points
+against marine polygons. A point in no polygon (coastal cells, 110m generalisation) takes the
+nearest polygon within ``NEAREST_MAX_DEG``; beyond that, land falls back to the box method below
+(remote islands) and water is ``"Inland waters"`` (lakes). There is no polar band in this method:
+Arctic land goes to its continent and Antarctic land is ``"Antarctica"``.
+
+The data is used when it can be loaded. ``$BLINDEARTH_REGIONS`` controls this: ``auto``
+(default; download if missing), ``cached`` (use only files already in the cache), ``boxes``
+(never). Under pytest the default is ``boxes`` so tests never touch the network.
+
+**Lat/lon boxes** (``method == "lat-lon-boxes"``, fallback when the data or shapely is
+unavailable). Self-contained approximation, no polygon data. Each point is labelled from its
 (lat, lon) and its *true* class:
 
 - Polar bands first: lat >= 66.5 (Arctic Circle) -> ``"Arctic"`` (land and water together);
@@ -27,10 +53,21 @@ misassigned; at a 2° grid that is a handful of cells and region figures are ind
 
 from __future__ import annotations
 
+import functools
+import logging
+import os
+import struct
+import zipfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
 import numpy as np
 import pandas as pd
 
 from blindearth.scoring.cell_metrics import point_arrays
+
+log = logging.getLogger(__name__)
 
 ARCTIC_LAT = 66.5
 ANTARCTIC_LAT = -60.0
@@ -44,6 +81,61 @@ OCEANS = (
     "Inland waters",
 )
 POLAR = ("Arctic", "Antarctica", "Southern Ocean")
+
+# Fixed label set of the polygon method.
+POLY_LAND = CONTINENTS + ("Antarctica",)
+POLY_WATER = (
+    "Atlantic Ocean",
+    "Pacific Ocean",
+    "Indian Ocean",
+    "Arctic Ocean",
+    "Southern Ocean",
+    "Mediterranean & Black Sea",
+    "Inland waters",
+)
+
+METHOD_POLYGONS = "natural-earth-110m"
+METHOD_BOXES = "lat-lon-boxes"
+ENV_MODE = "BLINDEARTH_REGIONS"  # auto | cached | boxes
+NEAREST_MAX_DEG = 3.0
+
+_NE_BASE_URL = "https://naciscdn.org/naturalearth/110m/physical/"
+_NE_LAND = "ne_110m_geography_regions_polys"
+_NE_MARINE = "ne_110m_geography_marine_polys"
+
+# marine_polys ``name`` (lower-cased) -> label. Unlisted names fall back to keywords.
+_MARINE_GROUPS: dict[str, str] = {
+    **dict.fromkeys(
+        ("arctic ocean", "beaufort sea", "baffin bay", "hudson bay"), "Arctic Ocean"
+    ),
+    **dict.fromkeys(("southern ocean", "weddell sea", "ross sea"), "Southern Ocean"),
+    **dict.fromkeys(
+        ("north atlantic ocean", "south atlantic ocean", "caribbean sea", "gulf of mexico",
+         "labrador sea"),
+        "Atlantic Ocean",
+    ),
+    **dict.fromkeys(
+        ("north pacific ocean", "south pacific ocean", "philippine sea", "tasman sea",
+         "south china sea", "coral sea", "sea of okhotsk", "sea of japan", "gulf of alaska"),
+        "Pacific Ocean",
+    ),
+    **dict.fromkeys(
+        ("indian ocean", "bay of bengal", "arabian sea", "red sea", "persian gulf"),
+        "Indian Ocean",
+    ),
+    **dict.fromkeys(("mediterranean sea", "black sea"), "Mediterranean & Black Sea"),
+    "caspian sea": "Inland waters",
+}
+_REGION_GROUPS: dict[str, str] = {x.lower(): x for x in POLY_LAND}
+
+
+class RegionAccuracy(dict):
+    """``dict[str, float]`` (label -> accuracy) that also carries ``method``, the labelling
+    method used (``METHOD_POLYGONS`` or ``METHOD_BOXES``; ``None`` for an empty input)."""
+
+    def __init__(self, *args: Any, method: str | None = None, **kw: Any):
+        super().__init__(*args, **kw)
+        self.method = method
 
 # (lat, lon, label) anchors for land not caught by a box.
 _ANCHORS = [
@@ -146,15 +238,12 @@ def water_region(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
     return a.out
 
 
-def region_labels(lat: np.ndarray, lon: np.ndarray, truth: np.ndarray) -> np.ndarray:
-    """String label per point (object array). Unknown truth -> ``"Unknown"``."""
-    lat = np.asarray(lat, dtype=float)
-    lon = np.asarray(lon, dtype=float)
-    t = np.asarray(truth, dtype=float)
+def _box_labels(lat: np.ndarray, lon: np.ndarray, cls: np.ndarray) -> np.ndarray:
+    """Box method. ``cls``: 1 land, 0 water, -1 unknown."""
     out = np.full(lat.size, "Unknown", dtype=object)
-    known = np.isfinite(t)
-    land = known & (t > 0.5)
-    water = known & ~(t > 0.5)
+    known = cls >= 0
+    land = cls == 1
+    water = cls == 0
     arctic = lat >= ARCTIC_LAT
     south = lat < ANTARCTIC_LAT
     out[known & arctic] = "Arctic"
@@ -170,12 +259,300 @@ def region_labels(lat: np.ndarray, lon: np.ndarray, truth: np.ndarray) -> np.nda
     return out
 
 
+# --------------------------------------------------------------------------- Natural Earth data
+
+
+def _read_dbf(buf: bytes) -> list[dict[str, str] | None]:
+    """Minimal dBASE III reader: one dict of stripped strings per record (None if deleted)."""
+    if len(buf) < 32:
+        raise ValueError("not a dBASE file (.dbf)")
+    n_rec, header_len, rec_len = struct.unpack("<IHH", buf[4:12])
+    fields: list[tuple[str, int]] = []
+    pos = 32
+    while pos + 32 <= header_len and buf[pos] != 0x0D:
+        name = buf[pos : pos + 11].split(b"\0", 1)[0].decode("ascii", "replace")
+        fields.append((name, buf[pos + 16]))
+        pos += 32
+    out: list[dict[str, str] | None] = []
+    for i in range(n_rec):
+        start = header_len + i * rec_len
+        rec = buf[start : start + rec_len]
+        if len(rec) < rec_len:
+            raise ValueError("truncated .dbf")
+        if rec[:1] == b"*":
+            out.append(None)
+            continue
+        row: dict[str, str] = {}
+        p = 1
+        for name, width in fields:
+            row[name] = rec[p : p + width].decode("utf-8", "replace").strip()
+            p += width
+        out.append(row)
+    return out
+
+
+def _zip_member(names: list[str], filename: str) -> str:
+    for n in names:
+        if n.rsplit("/", 1)[-1].lower() == filename.lower():
+            return n
+    raise ValueError(f"{filename} not found in archive")
+
+
+def _rings_to_geom(rings: list[np.ndarray]):
+    """Shapefile rings -> shapely geometry (even-odd rule, so holes cut out). None if empty."""
+    from shapely.geometry import Polygon
+
+    geom = None
+    for r in rings:
+        p = Polygon(r)
+        if not p.is_valid:
+            p = p.buffer(0)
+        if p.is_empty:
+            continue
+        geom = p if geom is None else geom.symmetric_difference(p)
+    return geom
+
+
+def _read_layer(zip_path: Path, stem: str) -> tuple[list[Any], list[dict[str, str] | None]]:
+    """(geometries, attribute rows) of a zipped shapefile, aligned by record."""
+    from blindearth.evalspec.masks import read_shp_polygons
+
+    with zipfile.ZipFile(zip_path) as zf:
+        names = zf.namelist()
+        shp = zf.read(_zip_member(names, stem + ".shp"))
+        dbf = zf.read(_zip_member(names, stem + ".dbf"))
+    rows = _read_dbf(dbf)
+    shapes = list(read_shp_polygons(shp))
+    if len(shapes) != len(rows):
+        raise ValueError(f"{stem}: {len(shapes)} polygon records but {len(rows)} attribute rows")
+    return [_rings_to_geom(rings) for _, rings in shapes], rows
+
+
+def _field(row: dict[str, str], name: str) -> str:
+    for k, v in row.items():
+        if k.lower() == name:
+            return v
+    return ""
+
+
+def land_group(row: dict[str, str]) -> str | None:
+    """Continent label of a geography_regions_polys row (``REGION`` field), or None."""
+    return _REGION_GROUPS.get(" ".join(_field(row, "region").split()).lower())
+
+
+def marine_group(row: dict[str, str]) -> str | None:
+    """Ocean label of a geography_marine_polys row (``name`` field), or None."""
+    name = " ".join(_field(row, "name").split()).lower()
+    if name in _MARINE_GROUPS:
+        return _MARINE_GROUPS[name]
+    for key, label in (("atlantic", "Atlantic Ocean"), ("pacific", "Pacific Ocean"),
+                       ("indian", "Indian Ocean"), ("arctic", "Arctic Ocean"),
+                       ("southern", "Southern Ocean"), ("antarctic", "Southern Ocean")):
+        if key in name:
+            return label
+    return None
+
+
+@dataclass
+class _LayerIndex:
+    tree: Any  # shapely.STRtree
+    labels: np.ndarray  # object, per tree geometry
+    prio: np.ndarray  # float, lower wins when a point is in several polygons
+
+
+@dataclass
+class _PolyIndex:
+    land: _LayerIndex
+    water: _LayerIndex
+
+
+def _make_layer(geoms: list[Any], labels: list[str | None], prio: list[float]) -> _LayerIndex:
+    from shapely import STRtree
+
+    keep = [i for i, (g, lab) in enumerate(zip(geoms, labels)) if g is not None and lab]
+    if not keep:
+        raise ValueError("no usable polygons")
+    return _LayerIndex(
+        tree=STRtree([geoms[i] for i in keep]),
+        labels=np.array([labels[i] for i in keep], dtype=object),
+        prio=np.array([prio[i] for i in keep], dtype=float),
+    )
+
+
+def build_index(land: tuple[list[Any], list[dict[str, str] | None]],
+                water: tuple[list[Any], list[dict[str, str] | None]]) -> _PolyIndex:
+    """Index (geometries, rows) of the land (regions) and water (marine) layers."""
+    lg, lr = land
+    l_labels = [land_group(r) if r else None for r in lr]
+    # Continent polygons first, then the smallest feature (e.g. an island group).
+    l_prio = [
+        (0.0 if r and _field(r, "featurecla").lower() == "continent" else 1e6)
+        + (g.area if g is not None else 0.0)
+        for g, r in zip(lg, lr)
+    ]
+    wg, wr = water
+    w_labels = [marine_group(r) if r else None for r in wr]
+    w_prio = [g.area if g is not None else 0.0 for g in wg]
+    return _PolyIndex(_make_layer(lg, l_labels, l_prio), _make_layer(wg, w_labels, w_prio))
+
+
+def _ne_source(stem: str):
+    from blindearth.evalspec.masks import _Source
+
+    return _Source(
+        id=stem,
+        label=f"Natural Earth 1:110m {stem}",
+        url=_NE_BASE_URL + stem + ".zip",
+        sha256=None,  # no upstream sha256: trust-on-first-use via masks' checksums.json
+        filename=stem + ".zip",
+        layers=(),
+        min_size=10_000,  # rejects HTML error pages / truncated files
+    )
+
+
+@functools.lru_cache(maxsize=4)
+def _load_index(cache_dir: str, allow_download: bool) -> _PolyIndex | None:
+    """Load (downloading once if allowed) and index the polygons; None when unavailable."""
+    try:
+        import shapely  # noqa: F401
+
+        from blindearth.evalspec.masks import _fetch
+
+        cache = Path(cache_dir)
+        paths: dict[str, Path] = {}
+        for stem in (_NE_LAND, _NE_MARINE):
+            src = _ne_source(stem)
+            if not allow_download and not (cache / "downloads" / src.filename).exists():
+                log.info("region polygons not cached (%s); using lat/lon boxes", src.filename)
+                return None
+            paths[stem] = _fetch(src, cache)
+        return build_index(_read_layer(paths[_NE_LAND], _NE_LAND),
+                           _read_layer(paths[_NE_MARINE], _NE_MARINE))
+    except Exception as exc:  # noqa: BLE001 - offline, missing shapely, bad archive
+        log.warning("Natural Earth region polygons unavailable (%s); using lat/lon boxes", exc)
+        return None
+
+
+def _mode() -> str:
+    mode = os.environ.get(ENV_MODE, "").strip().lower()
+    if mode in ("auto", "cached", "boxes"):
+        return mode
+    return "boxes" if "PYTEST_CURRENT_TEST" in os.environ else "auto"
+
+
+def _get_index(mode: str, cache_dir: str | None = None) -> _PolyIndex | None:
+    if mode == "boxes":
+        return None
+    if cache_dir is None:
+        from blindearth.evalspec.masks import default_cache_dir
+
+        cache_dir = str(default_cache_dir())
+    return _load_index(cache_dir, mode == "auto")
+
+
+def _layer_labels(idx: _LayerIndex, lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
+    """Label per point from the containing polygon, else the nearest within NEAREST_MAX_DEG.
+    Object array; None where neither applies."""
+    import shapely
+
+    out = np.full(lat.size, None, dtype=object)
+    if lat.size == 0:
+        return out
+    pts = shapely.points(lon, lat)
+    hits = idx.tree.query(pts, predicate="intersects")
+    if hits.size:
+        pi, ti = hits
+        order = np.lexsort((idx.prio[ti], pi))
+        pi, ti = pi[order], ti[order]
+        _, first = np.unique(pi, return_index=True)
+        out[pi[first]] = idx.labels[ti[first]]
+    miss = np.flatnonzero(np.array([x is None for x in out], dtype=bool))
+    if miss.size:
+        near = idx.tree.query_nearest(pts[miss], max_distance=NEAREST_MAX_DEG, all_matches=False)
+        if near.size:
+            out[miss[near[0]]] = idx.labels[near[1]]
+    return out
+
+
+def _polygon_labels(idx: _PolyIndex, lat: np.ndarray, lon: np.ndarray, cls: np.ndarray) -> np.ndarray:
+    out = np.full(lat.size, "Unknown", dtype=object)
+    for value, layer in ((1, idx.land), (0, idx.water)):
+        m = np.flatnonzero(cls == value)
+        if not m.size:
+            continue
+        lab = _layer_labels(layer, lat[m], lon[m])
+        miss = np.array([x is None for x in lab], dtype=bool)
+        if miss.any():
+            lab[miss] = (land_continent(lat[m][miss], lon[m][miss]) if value == 1
+                         else "Inland waters")
+        out[m] = lab
+    return out
+
+
+@functools.lru_cache(maxsize=32)
+def _labels_cached(lat_b: bytes, lon_b: bytes, cls_b: bytes, mode: str,
+                   cache_dir: str | None) -> tuple[np.ndarray, str]:
+    lat = np.frombuffer(lat_b, dtype=float)
+    lon = np.frombuffer(lon_b, dtype=float)
+    cls = np.frombuffer(cls_b, dtype=np.int8)
+    idx = _get_index(mode, cache_dir)
+    if idx is not None:
+        labels, method = _polygon_labels(idx, lat, lon, cls), METHOD_POLYGONS
+    else:
+        labels, method = _box_labels(lat, lon, cls), METHOD_BOXES
+    labels.setflags(write=False)
+    return labels, method
+
+
+def clear_cache() -> None:
+    """Forget cached labels and loaded polygons (e.g. after changing ``$BLINDEARTH_REGIONS``)."""
+    _labels_cached.cache_clear()
+    _load_index.cache_clear()
+
+
+def region_method(cache_dir: str | Path | None = None) -> str:
+    """The labelling method region functions would use now (may load/download the data)."""
+    idx = _get_index(_mode(), None if cache_dir is None else str(cache_dir))
+    return METHOD_POLYGONS if idx is not None else METHOD_BOXES
+
+
+def region_labels_with_method(lat: np.ndarray, lon: np.ndarray, truth: np.ndarray, *,
+                              cache_dir: str | Path | None = None) -> tuple[np.ndarray, str]:
+    """``(labels, method)``. Labels per grid point are cached by (lat, lon, truth class)."""
+    lat = np.ascontiguousarray(lat, dtype=float).ravel()
+    lon = ((np.ascontiguousarray(lon, dtype=float).ravel() + 180.0) % 360.0) - 180.0
+    t = np.asarray(truth, dtype=float).ravel()
+    cls = np.where(np.isfinite(t), (t > 0.5).astype(np.int8), np.int8(-1)).astype(np.int8)
+    labels, method = _labels_cached(
+        lat.tobytes(), np.ascontiguousarray(lon).tobytes(), cls.tobytes(), _mode(),
+        None if cache_dir is None else str(cache_dir),
+    )
+    return labels.copy(), method
+
+
+def region_labels(lat: np.ndarray, lon: np.ndarray, truth: np.ndarray) -> np.ndarray:
+    """String label per point (object array). Unknown truth -> ``"Unknown"``."""
+    return region_labels_with_method(lat, lon, truth)[0]
+
+
+_ORDER = {
+    n: i
+    for i, n in enumerate(
+        dict.fromkeys(CONTINENTS + POLAR + ("Arctic Ocean",) + OCEANS + POLY_WATER)
+    )
+}
+
+
 def region_accuracy(df: pd.DataFrame, threshold: float = 0.5) -> dict[str, float]:
-    """Area-weighted accuracy per region label (invalid answers count as wrong)."""
+    """Area-weighted accuracy per region label (invalid answers count as wrong).
+
+    Returns a :class:`RegionAccuracy` (a plain ``dict[str, float]`` with a ``method``
+    attribute naming the labelling method used).
+    """
     if df is None or len(df) == 0:
-        return {}
+        return RegionAccuracy()
     a = point_arrays(df, threshold)
-    labels = region_labels(a["lat"], a["lon"], a["truth"])
+    labels, method = region_labels_with_method(a["lat"], a["lon"], a["truth"])
     k = a["known"]
     out: dict[str, float] = {}
     for lab in pd.unique(labels[k]):
@@ -183,5 +560,6 @@ def region_accuracy(df: pd.DataFrame, threshold: float = 0.5) -> dict[str, float
         sw = float(a["w"][m].sum())
         if sw > 0:
             out[str(lab)] = float((a["w"][m] * a["correct"][m]).sum() / sw)
-    order = {n: i for i, n in enumerate(CONTINENTS + POLAR + OCEANS)}
-    return dict(sorted(out.items(), key=lambda kv: (order.get(kv[0], 99), kv[0])))
+    return RegionAccuracy(
+        sorted(out.items(), key=lambda kv: (_ORDER.get(kv[0], 99), kv[0])), method=method
+    )

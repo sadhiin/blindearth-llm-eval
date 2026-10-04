@@ -13,6 +13,7 @@ import dataclasses
 import hashlib
 import json
 
+from blindearth.thinking_defaults import KNOWN_KINDS, always_thinks, thinks_by_default
 from blindearth.types import ExtractionMode, ExtractionSpec, ModelSpec, RunConfig
 
 HASH_VERSION = 1
@@ -24,8 +25,54 @@ DEFAULT_PLAIN_MAX_OUTPUT_TOKENS = 16
 DEFAULT_TOP_LOGPROBS = 20
 
 
-def is_thinking(config: RunConfig, model: ModelSpec) -> bool:
-    return bool(model.forced_thinking) or config.effort not in (None, "off")
+def infer_provider_kind(model: ModelSpec) -> str | None:
+    """Best-effort provider kind for a model when the ProviderSpec is not at hand.
+
+    The provider id usually equals its kind (`anthropic`, `openai`, ...); otherwise None, which
+    makes the thinking table match the model name against every vendor's patterns.
+    """
+    pid = (model.provider or "").lower()
+    return pid if pid in KNOWN_KINDS else None
+
+
+def model_thinks_by_default(model: ModelSpec, provider_kind: str | None = None) -> bool:
+    """Registry override `thinks_by_default: bool` first, then the built-in table."""
+    override = (model.extra or {}).get("thinks_by_default")
+    if isinstance(override, bool):
+        return override
+    kind = provider_kind or infer_provider_kind(model)
+    return thinks_by_default(kind, model.name)
+
+
+def model_always_thinks(model: ModelSpec, provider_kind: str | None = None) -> bool:
+    """Reasoning cannot be turned off: registry `forced_thinking`, or the built-in table
+    (unless the registry says `thinks_by_default: false`). Such runs are starred in reports."""
+    if model.forced_thinking:
+        return True
+    if (model.extra or {}).get("thinks_by_default") is False:
+        return False
+    return always_thinks(provider_kind or infer_provider_kind(model), model.name)
+
+
+def is_thinking(config: RunConfig, model: ModelSpec, provider_kind: str | None = None) -> bool:
+    """Whether a run of `model` under `config` reasons before answering.
+
+    - `forced_thinking` on the model, or a model that cannot turn reasoning off: always True
+      (an explicit effort "off" stays thinking; the adapter refuses or maps it to the minimum).
+    - effort set and not "off": True.
+    - effort "off": False.
+    - effort None (provider default): True if the model reasons by default
+      (`blindearth.thinking_defaults`, overridable with `thinks_by_default` in the registry).
+
+    `provider_kind` is the ProviderSpec.kind when the caller has it; otherwise it is inferred
+    from `model.provider`.
+    """
+    if model_always_thinks(model, provider_kind):
+        return True
+    kind = provider_kind or infer_provider_kind(model)
+    if config.effort is None:
+        return model_thinks_by_default(model, kind)
+    return config.effort != "off"
 
 
 def thinking_floor(effort: str | None) -> int:

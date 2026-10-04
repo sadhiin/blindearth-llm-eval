@@ -353,6 +353,7 @@ def load_comparison(
         regions = metrics.get("regions")
         if not isinstance(regions, dict) or not regions:
             regions = region_accuracy(df, threshold) if len(df) else {}
+            metrics["regions_method"] = getattr(regions, "method", None)
 
         ci = _ci_from_metrics(metrics)
         if ci is None:

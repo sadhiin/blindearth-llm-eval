@@ -38,6 +38,11 @@ providers:
     kind: transformers
 
 models:
+  # Thinking labels: a run with no effort is labeled thinking when the model reasons by
+  # default (table in blindearth/thinking_defaults.py). Set `forced_thinking: true` on models
+  # whose reasoning cannot be turned off (they are starred in reports), or override the table
+  # with `thinks_by_default: true|false` for models it does not know.
+
   # Anthropic
   - id: opus-5-5
     provider: anthropic
@@ -45,10 +50,10 @@ models:
     forced_thinking: true       # thinking cannot be disabled on this model
   - id: sonnet-5-5
     provider: anthropic
-    name: claude-sonnet-5-5
+    name: claude-sonnet-5-5     # thinks by default; effort=off -> between_tools (no up-front thinking)
   - id: haiku-4-5
     provider: anthropic
-    name: claude-haiku-4-5
+    name: claude-haiku-4-5      # thinking is opt-in (effort low..max)
 
   # OpenAI
   - id: gpt-4-1-mini
@@ -56,12 +61,12 @@ models:
     name: gpt-4.1-mini          # chat model: logprobs available
   - id: gpt-5-1
     provider: openai
-    name: gpt-5.1               # reasoning model: logprobs only at effort=off
+    name: gpt-5.1               # reasoning_effort defaults to none; logprobs only at effort=off
 
   # Google
   - id: gemini-2-5-flash
     provider: google
-    name: gemini-2.5-flash
+    name: gemini-2.5-flash      # thinks by default; effort=off -> thinking_budget 0
 
   # OpenRouter (any routed model)
   - id: llama-3-3-70b-or

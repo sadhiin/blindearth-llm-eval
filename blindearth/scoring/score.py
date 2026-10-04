@@ -111,6 +111,7 @@ def score_run(
         df, threshold, probabilistic, step_deg=step, placement=placement
     )
     metrics["regions"] = region_accuracy(df, threshold)
+    metrics["regions_method"] = getattr(metrics["regions"], "method", None)
     est, lo, hi = block_bootstrap_ci(df, acc_area_stat(threshold)) if len(df) else (None, None, None)
     metrics["acc_area_ci"] = [est, lo, hi]
     metrics["image"] = (

@@ -14,17 +14,26 @@ Model families (detected from the name; override with registry `extra.openai_fam
 | o         | o1*, o3*, o4*                            | refused                        |
 | gpt5      | gpt-5, gpt-5-mini, gpt-5-nano            | refused                        |
 | gpt51     | gpt-5.1*                                 | only at effort=off ("none")    |
-| gpt52     | gpt-5.2 and later gpt-5.x                | only at effort=off ("none")    |
+| gpt52     | gpt-5.2 and later gpt-5.x, other gpt-6+  | only at effort=off ("none")    |
+| gpt6astra | gpt-6-astra*                             | refused (no "none" effort)     |
+| gpt6nonone| gpt-6.1-sol* (no "none" / "minimal")     | refused (no "none" effort)     |
 
 Effort mapping (normalized -> `reasoning_effort`):
 
-| normalized | chat            | o        | gpt5                         | gpt51   | gpt52   |
-|------------|-----------------|----------|------------------------------|---------|---------|
-| off        | no-op (no reasoning) | refused | "minimal" (least reasoning; not zero) | "none" | "none" |
-| low        | refused         | "low"    | "low"                        | "low"   | "low"   |
-| medium     | refused         | "medium" | "medium"                     | "medium"| "medium"|
-| high       | refused         | "high"   | "high"                       | "high"  | "high"  |
-| max        | refused         | refused  | refused                      | refused | "xhigh" |
+| normalized | chat            | o        | gpt5                         | gpt51   | gpt52   | gpt6astra | gpt6nonone |
+|------------|-----------------|----------|------------------------------|---------|---------|-----------|------------|
+| off        | no-op (no reasoning) | refused | "minimal" (least reasoning; not zero) | "none" | "none" | refused | refused |
+| low        | refused         | "low"    | "low"                        | "low"   | "low"   | "low"     | "low"      |
+| medium     | refused         | "medium" | "medium"                     | "medium"| "medium"| "medium"  | "medium"   |
+| high       | refused         | "high"   | "high"                       | "high"  | "high"  | "high"    | "high"     |
+| max        | refused         | refused  | refused                      | refused | "xhigh" | "max"     | "xhigh"    |
+
+gpt-6-astra accepts "low, medium, high, xhigh, and max"
+(https://developers.openai.com/api/docs/models/gpt-6-astra); "GPT-6 Astra does not support none"
+and "GPT-6.1 Sol does not support none or minimal"
+(https://developers.openai.com/api/docs/guides/reasoning). gpt-6.1-sol's upper levels are
+UNVERIFIED, so max maps to "xhigh" there. Which gpt-6+ models cannot turn reasoning off comes
+from `blindearth.thinking_defaults.always_thinks`.
 
 Native strings (e.g. "minimal", "xhigh") pass through when listed for the family.
 Override per model with `extra.effort_map: {level: native|null}`.
@@ -56,6 +65,7 @@ from blindearth.providers.openai_compat import (
     split_think,
 )
 from blindearth.ratelimit import parse_retry_after
+from blindearth.thinking_defaults import always_thinks
 from blindearth.types import (
     CallParams,
     Capabilities,
@@ -79,6 +89,15 @@ FAMILIES: dict[str, dict[str, Any]] = {
               "map": {"off": "none", "low": "low", "medium": "medium", "high": "high",
                       "max": "xhigh"},
               "native": ["none", "low", "medium", "high", "xhigh"], "sampling_when_none": True},
+    # Reasoning cannot be turned off: "off" maps to None, which map_config refuses.
+    "gpt6astra": {"reasoning": True,
+                  "map": {"off": None, "low": "low", "medium": "medium", "high": "high",
+                          "max": "max"},
+                  "native": ["low", "medium", "high", "xhigh", "max"]},
+    "gpt6nonone": {"reasoning": True,
+                   "map": {"off": None, "low": "low", "medium": "medium", "high": "high",
+                           "max": "xhigh"},
+                   "native": ["low", "medium", "high", "xhigh"]},
 }
 TOP_LOGPROBS_CAP = 20
 
@@ -97,6 +116,10 @@ def openai_family(name: str) -> str:
     if n.startswith("gpt-5"):
         return "gpt5"
     if re.match(r"^gpt-(\d+)", n) and int(re.match(r"^gpt-(\d+)", n).group(1)) >= 6:
+        if n.startswith("gpt-6-astra"):
+            return "gpt6astra"
+        if always_thinks("openai", n):  # no "none" effort, e.g. gpt-6.1-sol
+            return "gpt6nonone"
         return "gpt52"
     return "chat"
 
@@ -138,6 +161,10 @@ class OpenAIAdapter(Adapter):
         if effort in emap:
             v = emap[effort]
             if v is None:
+                if effort == "off" and self.profile["reasoning"]:
+                    raise UnsupportedConfigError(
+                        f"{self.model.name}: reasoning cannot be turned off on this model "
+                        f"(no 'none' effort); use effort=low")
                 raise UnsupportedConfigError(f"{self.model.name}: effort={effort!r} refused")
             return None if v == "__noop__" else v
         if effort in self.profile["native"]:

@@ -323,7 +323,8 @@ def _region_table(views: list[RunView]) -> dict:
             bg, fg = _heat(x, lo, hi)
             cells.append({"text": fmt_pct(x), "bg": bg, "fg": fg, "v": _sortval(x)})
         rows.append({"label": v.label, "acc": v.acc, "forced": v.forced_thinking, "cells": cells})
-    return {"cols": cols, "rows": rows, "lo": lo, "hi": hi,
+    methods = sorted({str(m) for v in views if (m := (v.metrics or {}).get("regions_method"))})
+    return {"cols": cols, "rows": rows, "lo": lo, "hi": hi, "methods": methods,
             "legend": [HEAT_RAMP[0], HEAT_RAMP[len(HEAT_RAMP) // 2], HEAT_RAMP[-1]]}
 
 

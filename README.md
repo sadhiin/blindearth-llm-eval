@@ -79,6 +79,20 @@ matrix:
     configs: [ {} ]
 ```
 
+### Masks
+
+`natural-earth-land` and `gshhg` download on first use into `~/.cache/blindearth` (or
+`$BLINDEARTH_CACHE`). Downloads are written atomically and checked (not an HTML page, full length,
+valid zip with the expected layers). Upstream publishes no sha256, so the first good download's
+hash goes into `<cache>/checksums.json`, and later reads must match it. If they don't, delete the
+cached file, or set `BLINDEARTH_ACCEPT_NEW_CHECKSUMS=1` once to accept a new upstream version.
+
+`modis-mod44w` reads `<cache>/modis-mod44w/mod44w_global.tif` (or `mask.path`). Alternatively,
+set `BLINDEARTH_MODIS_DOWNLOAD=1` together with `EARTHDATA_TOKEN` (or a
+`machine urs.earthdata.nasa.gov` entry in `~/.netrc`), and the MOD44W v061 tiles for
+`BLINDEARTH_MODIS_YEAR` (default 2021) are downloaded from LP DAAC and mosaicked. This needs
+rasterio built with GDAL's HDF4 driver (e.g. from conda-forge).
+
 ## CLI
 
 ```bash

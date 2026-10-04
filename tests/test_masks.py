@@ -195,7 +195,8 @@ def test_load_mask_upload_and_downsample(tmp_path):
     assert small.shape == (400, 800)  # coarser than 1 km: kept as is
 
 
-def test_load_mask_errors(tmp_path):
+def test_load_mask_errors(tmp_path, monkeypatch):
+    monkeypatch.delenv("BLINDEARTH_MODIS_DOWNLOAD", raising=False)
     with pytest.raises(ValueError):
         load_mask(MaskSpec(id="upload"), cache_dir=tmp_path)
     with pytest.raises(ValueError):

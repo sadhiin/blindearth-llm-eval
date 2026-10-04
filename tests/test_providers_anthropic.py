@@ -94,6 +94,21 @@ def test_family_detection():
     assert anthropic_family("claude-sonnet-4-5-20250929") == "budget"
 
 
+def test_family_detection_shared_table_and_spellings():
+    assert anthropic_family("claude-mythos-preview") == "always"
+    assert anthropic_family("claude-mythos-5-1") == "always"
+    assert anthropic_family("claude-opus-5-5@20261001") == "always"
+    assert anthropic_family("us.anthropic.claude-opus-5-5-v1:0") == "always"
+    assert anthropic_family("anthropic/claude-sonnet-4.6") == "adaptive46"
+    assert anthropic_family("anthropic/claude-opus-5") == "opus5"
+
+
+def test_mythos_preview_refuses_off():
+    a = _adapter("claude-mythos-preview")
+    with pytest.raises(UnsupportedConfigError):
+        a.map_config(RunConfig(effort="off"), ExtractionMode.SAMPLE)
+
+
 def test_opus55_mapping():
     a = _adapter()
     with pytest.raises(UnsupportedConfigError):

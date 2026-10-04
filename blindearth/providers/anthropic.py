@@ -16,7 +16,7 @@ Effort mapping (normalized -> native). Families are detected from the model name
 
 | family (models)                                   | off                         | low/medium/high/max                         | sampling params |
 |---------------------------------------------------|-----------------------------|---------------------------------------------|-----------------|
-| always (fable-5*, mythos-5*, opus-5-5)            | refused (thinking always on)| thinking adaptive + output_config.effort=<same> | refused (400)   |
+| always (fable-5*, mythos-*, opus-5-5)             | refused (thinking always on)| thinking adaptive + output_config.effort=<same> | refused (400)   |
 | opus5 (opus-5)                                    | thinking disabled           | adaptive + effort=<same>                    | refused         |
 | sonnet55 (sonnet-5-5)                             | thinking between_tools      | adaptive + effort=<same>                    | refused         |
 | adaptive (opus-4-7, opus-4-8)                     | thinking disabled           | adaptive + effort=<same>                    | refused         |
@@ -53,6 +53,7 @@ from blindearth.providers.openai_compat import (
     raise_for_thinking,
 )
 from blindearth.ratelimit import parse_retry_after
+from blindearth.thinking_defaults import always_thinks, normalize_model_name
 from blindearth.types import (
     CallParams,
     Capabilities,
@@ -86,9 +87,12 @@ DEFAULT_THINKING_FAMILIES = ("always", "opus5", "sonnet55", "sonnet5")
 
 
 def anthropic_family(name: str) -> str:
-    n = name.lower()
-    if n.startswith(("claude-fable-5", "claude-mythos-5", "claude-opus-5-5")):
+    # Always-thinking models (Opus 5.5, Fable/Mythos 5.x, Mythos Preview) come from the shared
+    # table in blindearth.thinking_defaults, which also normalizes OpenRouter/Bedrock/Vertex
+    # spellings ("anthropic/claude-opus-4.5", "us.anthropic.claude-...", "...@date").
+    if always_thinks("anthropic", name):
         return "always"
+    n = normalize_model_name(name)
     if n.startswith("claude-opus-5"):
         return "opus5"
     if n.startswith("claude-sonnet-5-5"):

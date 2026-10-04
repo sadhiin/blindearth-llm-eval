@@ -135,6 +135,28 @@ def _fmt_usd(x: Any) -> str:
     return "—" if x is None else f"${x:,.2f}"
 
 
+def create_checked_comparison(store: Any, name: str, run_ids: list[str]) -> tuple[bool, str]:
+    """Create a comparison after the same fairness check the CLI's ``compare`` runs.
+
+    Calls ``check_comparison`` and stores its filters with the comparison. Returns
+    ``(created, markdown)``: on refusal (runs from different eval specs) nothing is created and
+    the message explains why; otherwise the message lists any fairness warnings.
+    """
+    from blindearth.runner.planner import check_comparison
+
+    ids = list(run_ids)
+    try:
+        filters = check_comparison(store, ids)
+    except ValueError as e:
+        return False, f"**Not created (refused):** {e}"
+    cid = store.create_comparison(name, ids, filters=filters, ordering=None)
+    msg = f"Comparison **{name}** ({str(cid)[:12]}) created with {len(ids)} runs. Nothing is re-called."
+    warnings = filters.get("warnings") or []
+    if warnings:
+        msg += "\n\n**Fairness warnings:**\n" + "\n".join(f"- {w}" for w in warnings)
+    return True, msg
+
+
 # --------------------------------------------------------------------------- app
 
 
@@ -376,15 +398,11 @@ def build_app(db_path: str, registry_path: str) -> "gradio.Blocks":
             return "Pick saved runs.", gr.update()
         if not name:
             return "Name the comparison.", gr.update()
-        s = store()
-        runs = [s.get_run(r) for r in run_ids]
-        specs = {r.spec_id for r in runs}
-        if len(specs) > 1:
-            return ("**Not created:** these runs use different eval specs "
-                    f"({', '.join(x[:8] for x in sorted(specs))}); a comparison needs one spec."), gr.update()
-        s.create_comparison(name, list(run_ids))
-        return (f"Comparison **{name}** created with {len(run_ids)} runs. Nothing is re-called; "
-                "open the Saved comparisons tab to build the report."), gr.update(choices=comparison_choices(), value=name)
+        ok, msg = create_checked_comparison(store(), name, list(run_ids))
+        if not ok:
+            return msg, gr.update()
+        return (msg + "\n\nOpen the Saved comparisons tab to build the report."), \
+            gr.update(choices=comparison_choices(), value=name)
 
     # ------------------------------------------------------------------ step 3: variants
 
@@ -649,8 +667,10 @@ def build_app(db_path: str, registry_path: str) -> "gradio.Blocks":
             return "No runs to save yet.", gr.update()
         if not name:
             return "Name the comparison.", gr.update()
-        store().create_comparison(name, ids)
-        return f"Saved comparison **{name}** ({len(ids)} runs).", gr.update(choices=comparison_choices(), value=name)
+        ok, msg = create_checked_comparison(store(), name, ids)
+        if not ok:
+            return msg, gr.update()
+        return msg, gr.update(choices=comparison_choices(), value=name)
 
     # ------------------------------------------------------------------ saved comparisons
 

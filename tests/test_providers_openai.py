@@ -90,6 +90,26 @@ def test_family_detection():
     assert openai_family("gpt-5-mini") == "gpt5"
     assert openai_family("gpt-5.1") == "gpt51"
     assert openai_family("gpt-5.2-pro") == "gpt52"
+    assert openai_family("gpt-6-astra") == "gpt6astra"
+    assert openai_family("gpt-6.1-sol") == "gpt6nonone"
+    assert openai_family("gpt-6-sol") == "gpt52"
+    assert openai_family("gpt-6-luna") == "gpt52"
+
+
+def test_gpt6_without_none_refuses_off():
+    for name in ("gpt-6-astra", "gpt-6.1-sol"):
+        a = _adapter(name)
+        with pytest.raises(UnsupportedConfigError, match="cannot be turned off"):
+            a.map_config(RunConfig(effort="off"), ExtractionMode.SAMPLE)
+        with pytest.raises(UnsupportedConfigError):
+            a.map_config(RunConfig(), ExtractionMode.LOGPROBS)
+        n = a.map_config(RunConfig(), ExtractionMode.SAMPLE)
+        assert "reasoning_effort" not in n and n["max_completion_tokens"] >= 8192
+        assert "off" not in a.default_capabilities().supported_efforts
+    assert _adapter("gpt-6-astra").map_config(
+        RunConfig(effort="max"), ExtractionMode.SAMPLE)["reasoning_effort"] == "max"
+    assert _adapter("gpt-6.1-sol").map_config(
+        RunConfig(effort="max"), ExtractionMode.SAMPLE)["reasoning_effort"] == "xhigh"
 
 
 def test_chat_model_mapping():

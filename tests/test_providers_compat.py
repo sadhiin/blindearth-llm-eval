@@ -190,6 +190,46 @@ async def test_ollama_loops_samples_and_default_url():
     assert r.usage.input_tokens == 120
 
 
+def test_ollama_effort_levels_refused_unless_mapped_or_probed():
+    prov = ProviderSpec(id="ollama", kind="ollama")
+    a = OllamaAdapter(prov, _model("qwen3:8b", "ollama"))
+    assert a.map_config(RunConfig(effort="off"), ExtractionMode.SAMPLE)[
+        "reasoning_effort"] == "none"
+    for lvl in ("low", "medium", "high", "max", "think-hard"):
+        with pytest.raises(UnsupportedConfigError):
+            a.map_config(RunConfig(effort=lvl), ExtractionMode.SAMPLE)
+    with pytest.raises(ProviderError):  # classify path refuses too, never sends silently
+        a._build_body("p", None, P(effort="low"), 1)
+
+    # explicit model effort_map (e.g. gpt-oss, whose /api/show lists low/medium/high)
+    b = OllamaAdapter(prov, _model("gpt-oss:20b", "ollama",
+                                   effort_map={"low": {"reasoning_effort": "low"}}))
+    assert b.map_config(RunConfig(effort="low"), ExtractionMode.SAMPLE)[
+        "reasoning_effort"] == "low"
+    with pytest.raises(UnsupportedConfigError):
+        b.map_config(RunConfig(effort="high"), ExtractionMode.SAMPLE)
+
+    # provider-level effort_map works too
+    c = OllamaAdapter(ProviderSpec(id="ollama", kind="ollama",
+                                   extra={"effort_map": {"high": {"reasoning_effort": "high"}}}),
+                      _model("gpt-oss:20b", "ollama"))
+    assert c.map_config(RunConfig(effort="high"), ExtractionMode.SAMPLE)[
+        "reasoning_effort"] == "high"
+
+    # stored probe result listing the level
+    d = OllamaAdapter(prov, _model("gpt-oss:20b", "ollama"))
+    d.capabilities = Capabilities(effort_param=True, supported_efforts=["off", "medium"],
+                                  probed_at="2026-10-01T00:00:00+00:00")
+    assert d.map_config(RunConfig(effort="medium"), ExtractionMode.SAMPLE)[
+        "reasoning_effort"] == "medium"
+    with pytest.raises(UnsupportedConfigError):
+        d.map_config(RunConfig(effort="low"), ExtractionMode.SAMPLE)
+    # an unprobed capabilities object (no probed_at) does not unlock anything
+    d.capabilities = Capabilities(effort_param=True, supported_efforts=["medium"])
+    with pytest.raises(UnsupportedConfigError):
+        d.map_config(RunConfig(effort="medium"), ExtractionMode.SAMPLE)
+
+
 @respx.mock
 async def test_llamacpp_off_uses_chat_template_kwargs():
     route = respx.post("http://localhost:8080/v1/chat/completions").mock(
@@ -215,14 +255,20 @@ async def test_openrouter_reasoning_and_require_parameters():
                           _model("anthropic/claude-sonnet-5-5", "or"), api_key="k")
     r = await a.classify("p", None, P(effort="max"))
     sent = json.loads(route.calls[0].request.content)
-    assert sent["reasoning"] == {"max_tokens": 32000}
+    assert sent["reasoning"] == {"effort": "max"}
+    assert sent["provider"] == {"require_parameters": True}  # never silently dropped upstream
+    assert sent["max_tokens"] >= 32000
     assert route.calls[0].request.headers["x-title"] == "blindearth"
     assert r.resolved_model == "anthropic/claude-sonnet-5-5@Anthropic"
 
     await a.classify("p", None, P(effort="off", logprobs=True, top_logprobs=5))
     sent = json.loads(route.calls[1].request.content)
-    assert sent["reasoning"] == {"enabled": False}
+    assert sent["reasoning"] == {"effort": "none"}
     assert sent["provider"] == {"require_parameters": True}
+
+    await a.classify("p", None, P())
+    sent = json.loads(route.calls[2].request.content)
+    assert "reasoning" not in sent and "provider" not in sent
 
 
 def test_openrouter_effort_table():
@@ -231,6 +277,38 @@ def test_openrouter_effort_table():
         "effort": "medium"}
     with pytest.raises(UnsupportedConfigError):
         a.map_config(RunConfig(), ExtractionMode.LOGPROBS)  # unprobed: logprobs unknown
+    n = a.map_config(RunConfig(effort="off"), ExtractionMode.SAMPLE)
+    assert n["reasoning"] == {"effort": "none"}
+    assert n["provider"] == {"require_parameters": True}
+    assert a.map_config(RunConfig(effort="max"), ExtractionMode.SAMPLE)["reasoning"] == {
+        "effort": "max"}
+    for native in ("minimal", "xhigh"):
+        assert a.map_config(RunConfig(effort=native), ExtractionMode.SAMPLE)["reasoning"] == {
+            "effort": native}
+    for bad in ("none", "ultra"):  # "none" -> use "off"; "ultra" is not an OpenRouter effort
+        with pytest.raises(UnsupportedConfigError):
+            a.map_config(RunConfig(effort=bad), ExtractionMode.SAMPLE)
+    assert "provider" not in a.map_config(RunConfig(), ExtractionMode.SAMPLE)
+
+
+def test_openrouter_off_refused_on_forced_thinking_model():
+    m = _model("deepseek/deepseek-r1", "or")
+    m.forced_thinking = True
+    a = OpenRouterAdapter(ProviderSpec(id="or", kind="openrouter"), m)
+    with pytest.raises(UnsupportedConfigError):
+        a.map_config(RunConfig(effort="off"), ExtractionMode.SAMPLE)
+    assert a.map_config(RunConfig(effort="low"), ExtractionMode.SAMPLE)["reasoning"] == {
+        "effort": "low"}
+
+
+def test_openrouter_top_logprobs_capped_at_20():
+    a = OpenRouterAdapter(ProviderSpec(id="or", kind="openrouter"), _model("x/y", "or"))
+    a.capabilities = Capabilities(logprobs=True, top_logprobs_max=None,
+                                  probed_at="2026-10-01T00:00:00+00:00")
+    n = a.map_config(RunConfig(top_logprobs=20), ExtractionMode.LOGPROBS)
+    assert n["top_logprobs"] == 20 and n["provider"] == {"require_parameters": True}
+    with pytest.raises(UnsupportedConfigError):
+        a.map_config(RunConfig(top_logprobs=21), ExtractionMode.LOGPROBS)
 
 
 def test_missing_base_url_is_an_error():
