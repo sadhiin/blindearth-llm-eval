@@ -1,11 +1,11 @@
 # blindearth module contracts
 
 Product spec: `Blind Earth Eval Runner Product Spec.md`. Shared types: `blindearth/types.py`.
-Adapter base: `blindearth/providers/base.py`. Both are fixed; do not edit them. If you truly need
-a new field, add it with a default and say so in your report.
+Adapter base: `blindearth/providers/base.py`. Treat both as stable: add a new field only with a
+default value, so existing code keeps working.
 
-Every public function below must exist with this signature. Modules may import each other only
-through these names. Owner letters refer to the work packages (A to E).
+Every public function below exists with this signature. Modules import each other only through
+these names. The letters A to E group the modules by area.
 
 ## Conventions
 
@@ -42,6 +42,18 @@ async def probe(adapter: Adapter, n_calls: int = 20) -> Capabilities
 # providers/{anthropic,openai_adapter,google,openrouter,openai_compat,local}.py
 # one Adapter subclass each; local.py has OllamaAdapter, LlamaCppAdapter (both via
 # OpenAI-compatible endpoints) and TransformersAdapter (in-process, exact first-token logits).
+# map_config raises UnsupportedConfigError for any setting it cannot honour; it never drops one.
+# Batch (submit_batch/poll_batch): anthropic, openai, google (Gemini Developer API only).
+
+# providers/openai_compat.py
+def resolve_effort_map(adapter: Adapter, default: dict[str, Any]) -> dict[str, Any]
+    # default, updated by provider extra.effort_map, then by model extra.effort_map
+
+# thinking_defaults.py   (which models reason when no effort is set; sourced from vendor docs)
+KNOWN_KINDS: frozenset[str]
+def normalize_model_name(name: str) -> str          # strips vendor prefixes, lowercases
+def thinks_by_default(provider_kind: str | None, model_name: str) -> bool
+def always_thinks(provider_kind: str | None, model_name: str) -> bool   # reasoning cannot be turned off
 
 # ratelimit.py
 class ProviderLimiter:
@@ -149,6 +161,14 @@ def export_metrics(store: Store, run_id: str, path: Path) -> Path
 # runner/hashing.py
 def run_hash(spec_id: str, model: ModelSpec, resolved_version: str | None, config: RunConfig,
              extraction: ExtractionSpec, mode: ExtractionMode, repeat_idx: int) -> str
+def effective_config(config: RunConfig, extraction: ExtractionSpec, mode: ExtractionMode, *,
+                     thinking: bool, top_logprobs_cap: int | None = None) -> RunConfig
+def is_thinking(config: RunConfig, model: ModelSpec, provider_kind: str | None = None) -> bool
+def model_thinks_by_default(model: ModelSpec, provider_kind: str | None = None) -> bool
+    # model extra.thinks_by_default wins over thinking_defaults
+def model_always_thinks(model: ModelSpec, provider_kind: str | None = None) -> bool
+    # model.forced_thinking, else thinking_defaults.always_thinks (unless thinks_by_default: false)
+def infer_provider_kind(model: ModelSpec) -> str | None
 
 # runner/planner.py
 @dataclass
@@ -157,12 +177,17 @@ class PlanCell:
     mode: ExtractionMode; repeat_idx: int; run_hash: str
     n_points: int; n_calls: int; est_usage: Usage; est_cost_usd: float | None
     cached_run_id: str | None; refused: str | None; native_params: dict
+    # with defaults: thinking: bool; forced_thinking: bool (= model_always_thinks; starred);
+    # resolved_version: str | None; resume_run_id: str | None; use_batch: bool
 @dataclass
 class Plan:
     eval_file: EvalFile; spec_id: str; mask: Mask; points: list[Point]; truth: np.ndarray
     cells: list[PlanCell]; total_cost_usd: float | None; budget_usd: float | None
 async def build_plan(eval_file: EvalFile, registry: Registry, store: Store, *,
                      pilot_points: int = 50, run_pilot: bool = True) -> Plan
+def check_comparison(store: Store, run_ids: list[str]) -> dict[str, Any]
+    # raises ValueError on mixed eval specs; else
+    # {spec_id, mixed_extraction_modes, rank_on, forced_thinking_runs, warnings}
 
 # runner/executor.py
 async def execute(plan: Plan, store: Store, registry: Registry, *,
@@ -183,14 +208,19 @@ async def resume(run_id: str, store: Store, registry: Registry, **kw) -> None
 
 ```python
 # scoring/cell_metrics.py
-def cell_metrics(df: pd.DataFrame, threshold: float = 0.5, probabilistic: bool = True) -> dict
+def cell_metrics(df: pd.DataFrame, threshold: float = 0.5, probabilistic: bool = True, *,
+                 step_deg: float | None = None, placement: Placement | None = None) -> dict
     # keys: acc_area, acc_unweighted, acc_valid_only, baseline_area, skill, precision, recall,
     # f1, iou, brier, log_loss, ece, invalid_rate, coastline_error_deg, n_points,
     # input_tokens, output_tokens, thinking_tokens, latency_p50, latency_p95
 
 # scoring/regions.py
+# Natural Earth 110m region/marine polygons; lat/lon boxes as fallback (env BLINDEARTH_REGIONS)
+class RegionAccuracy(dict):     # dict[str, float] with .method: "natural-earth-110m" | "lat-lon-boxes" | None
 def region_labels(lat: np.ndarray, lon: np.ndarray, truth: np.ndarray) -> np.ndarray  # str labels
-def region_accuracy(df: pd.DataFrame, threshold: float = 0.5) -> dict[str, float]
+def region_labels_with_method(lat: np.ndarray, lon: np.ndarray, truth: np.ndarray, *,
+                              cache_dir: str | Path | None = None) -> tuple[np.ndarray, str]
+def region_accuracy(df: pd.DataFrame, threshold: float = 0.5) -> RegionAccuracy
 
 # scoring/bootstrap.py
 def block_bootstrap_ci(df: pd.DataFrame, stat: Callable[[pd.DataFrame], float], *,
@@ -210,7 +240,9 @@ def error_overlay(pred_binary: np.ndarray, mask: np.ndarray) -> np.ndarray   # R
 # scoring/image_metrics.py
 def image_metrics(df: pd.DataFrame, mask: Mask, step_deg: float, placement: Placement,
                   threshold: float = 0.5, tolerances_deg: tuple[float, ...] = (2.0, 4.0),
-                  work_shape: tuple[int,int] = (1800, 3600)) -> dict
+                  work_shape: tuple[int,int] = (1800, 3600), *, truth_rule: TruthRule = "cell_center",
+                  probabilistic: bool = True, truth_grid: np.ndarray | None = None,
+                  min_landmass_km2: float = 5.0e5) -> dict
     # pixel_iou, dice, ssim, boundary_f@2, boundary_f@4, contour_mean_deg/km, contour_p95_deg/km,
     # n_components_pred, n_components_true, spurious_specks, per_landmass_iou{}, prob_rmse,
     # ceiling{...same keys for the perfect-at-this-grid map}, share_of_ceiling{...}
@@ -218,6 +250,8 @@ def image_metrics(df: pd.DataFrame, mask: Mask, step_deg: float, placement: Plac
 # scoring/score.py
 def score_run(store: Store, run_id: str, mask: Mask | None = None, threshold: float = 0.5,
               with_images: bool = True) -> dict      # computes + store.save_metrics
+    # keys: cell_metrics keys, regions, regions_method, acc_area_ci, image, plus run context
+    # (run_id, variant, extraction_mode, mask_hash, mask_source, partial, thinking, forced_thinking, ...)
 ```
 
 ## E. Reports and UI (`blindearth/report/*`, `blindearth/ui/*`)
@@ -242,6 +276,8 @@ def build_report(store: Store, comparison: str, out_html: Path, *, threshold: fl
     # region table, calibration, run health, validity caveats
 
 # ui/app.py
+def create_checked_comparison(store: Store, name: str, run_ids: list[str]) -> tuple[bool, str]
+    # same check_comparison as the CLI; -> (created, markdown message with refusal or warnings)
 def build_app(db_path: str, registry_path: str) -> "gradio.Blocks"
 def main(db_path: str = "blindearth.db", registry_path: str = "providers.yaml", port: int = 7860) -> None
 ```

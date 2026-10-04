@@ -7,6 +7,21 @@ run is stored in SQLite, so later comparisons and reports need no new API calls.
 
 The product spec is in `Blind Earth Eval Runner Product Spec.md`. Module contracts are in `INTERFACES.md`.
 
+## Status
+
+Every module in the spec is implemented, but the code has only had static checks so far
+(everything compiles and every import between modules resolves). The test suite has not been
+run yet, and the repo has no CI. Run `pytest` before relying on any results. Some details still
+need confirming against the live APIs; each is listed in the docstring of its module:
+
+- MOD44W download: whether LP DAAC accepts an Earthdata bearer token, and the exact name of the
+  data layer inside the MODIS files
+- whether OpenRouter's `require_parameters` routing also covers the `reasoning` setting
+- the Gemini `top_logprobs` cap, kept at a cautious 5
+- the no-effort thinking defaults of the newest gpt-6 models
+
+Development happens on `develop`. `main` holds the initial implementation.
+
 ## Install
 
 Python 3.11 or newer.
@@ -16,7 +31,11 @@ pip install -e .            # runner, CLI, scoring, reports
 pip install -e '.[ui]'      # + Gradio web UI (blindearth serve)
 pip install -e '.[local]'   # + in-process transformers models
 pip install -e '.[dev]'     # + pytest
+pip install -e '.[dev,ui]'  # what the full test suite needs (the UI tests import gradio)
 ```
+
+A full example registry is in `examples/providers.yaml`. Example specs: `examples/spec.yaml` and
+`examples/smoke_4deg.yaml`.
 
 ## Registry setup
 
@@ -46,9 +65,26 @@ models:
 The runner reads keys from the environment variable named in `api_key_env`, or from the OS
 keychain. Keys are never written to the results store.
 
-Provider `extra` settings that the runner reads (all optional): `concurrency`, `rpm`, `tpm`,
-`breaker_threshold` (default 20 failures), `breaker_window_s` (default 60), `batch_poll_s`
-(default 30) and `store_thinking` (store the full thinking text, not only the token count).
+Provider kinds: `anthropic`, `openai`, `google`, `openrouter`, `openai_compatible` (vLLM, TGI,
+etc.), `ollama`, `llamacpp` and `transformers` (in-process, needs the `local` extra).
+
+Any key on a provider or model that the registry doesn't recognise is kept in that provider's or
+model's `extra`. The runner reads these keys (all optional):
+
+| Key | Where | What it does |
+|---|---|---|
+| `concurrency`, `rpm`, `tpm` | provider | rate limits |
+| `breaker_threshold`, `breaker_window_s` | provider | circuit breaker (default 20 failures in 60 s) |
+| `batch_poll_s` | provider | batch polling interval (default 30) |
+| `store_thinking` | provider | store the full thinking text, not only the token count |
+| `timeout_s` | provider | request timeout |
+| `effort_map` | provider or model | map an effort level to native request params, e.g. `{low: {reasoning_effort: low}}` |
+| `thinks_by_default` | model | `true`/`false`: overrides the built-in table of models that reason when no effort is set |
+| `vertexai` | provider (`google`) | use Vertex AI instead of the Gemini Developer API (no batch) |
+| `referer`, `title` | provider (`openrouter`) | OpenRouter attribution headers |
+
+Set `forced_thinking: true` on a model whose reasoning cannot be turned off. See
+[Thinking and effort](#thinking-and-effort).
 
 Probe each endpoint once. The probe makes 20 calls and records what the endpoint actually supports.
 With `extraction.mode: auto`, the planner then picks logprobs where the probe found them:
@@ -78,6 +114,44 @@ matrix:
   - model: my-vllm/qwen-local
     configs: [ {} ]
 ```
+
+### Thinking and effort
+
+`effort` is one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or unset. Each adapter
+maps it to its vendor's native parameters. If the vendor can't honour a level, the adapter refuses
+it (the plan shows a refusal) rather than silently sending something else.
+
+- **No effort set:** the run counts as a thinking run when the model reasons by default.
+  `blindearth/thinking_defaults.py` holds that table (for example Claude Sonnet 5.5, Gemini 2.5
+  Pro/Flash and Gemini 3.x think by default; Gemini 2.5 Flash-Lite and Claude Haiku 4.5 don't).
+  Override the table per model with `thinks_by_default`.
+- **Models that always think** (registry `forced_thinking`, or the table) refuse `effort: off`
+  and are starred in plans and reports.
+- **Thinking runs** have a minimum max-output-tokens that depends on effort: 4,096 at `low`,
+  8,192 at `medium` or with no effort, 16,384 at `high`, 32,768 at `max`. They always use
+  sampling rather than logprobs. Non-thinking runs default to 16 output tokens.
+- **Gemini 3.x** accepts only the thinking levels each model documents; for example 3 Pro has no
+  `medium`. Gemini 2.5 thinking budgets are range-checked.
+- **OpenRouter** sends `reasoning: {effort: ...}`, with `off` sent as `effort: "none"`. It also
+  sets `provider: {require_parameters: true}`, so requests aren't routed to an upstream that
+  would drop the reasoning or logprob settings. `top_logprobs` is capped at 20.
+- **Ollama, llama.cpp, transformers:** `off` is supported. Ollama silently ignores effort levels
+  a model doesn't support, so `low`/`medium`/`high` are refused unless an `effort_map` entry
+  enables them, e.g. for gpt-oss:
+
+  ```yaml
+  - id: gpt-oss-local
+    provider: ollama
+    name: gpt-oss:20b
+    effort_map: { low: { reasoning_effort: low }, high: { reasoning_effort: high } }
+  ```
+
+### Batch APIs
+
+With `use_batch: true` on the provider, the Anthropic, OpenAI and Google adapters submit cells
+through the vendor batch API (about half price, results within hours). Google batch works only
+on the Gemini Developer API, not Vertex. Requests are sent inline, and the adapter splits them
+into several batches to stay under the 20 MB limit per request.
 
 ### Masks
 
@@ -109,6 +183,23 @@ blindearth serve [--port 7860]                 # web UI (needs the ui extra)
 ```
 
 Run ids can be shortened to any unique prefix.
+
+`compare` (in both the CLI and the web UI) refuses runs from different eval specs. It stores the
+fairness check's findings with the comparison, and warns when runs mix extraction modes or include
+runs that always think.
+
+### Regions
+
+Reports break accuracy down by continent and ocean, using the Natural Earth 110m
+`geography_regions_polys` and `geography_marine_polys` layers. These are downloaded once into the
+cache, with the same checksum checks as the masks. A cell that falls in a gap between polygons
+takes the nearest polygon within 3°. If the polygons can't be loaded (offline, or shapely
+missing), latitude/longitude boxes are used instead. The report states which method it used.
+`BLINDEARTH_REGIONS` sets the behaviour:
+
+- `auto` (default): download the polygons if they aren't cached
+- `cached`: use the polygons only if they are already cached
+- `boxes`: always use the boxes (also the default when running under pytest)
 
 The plan table lists, for each cell, the extraction mode, points, calls, estimated input, output
 and thinking tokens, and estimated USD. It also marks cache hits (a finished run with the same
@@ -152,11 +243,34 @@ unless the plan finds a cache hit. The run hash covers:
 - the effective config: effort, temperature, samples, top logprobs, max output tokens, config system prompt and seed
 - the extraction mode and the repeat index
 
+Whether a run counts as a thinking run feeds into the effective config through its max output
+tokens. Runs on models that think by default, made with no effort set before PR #1, were labeled
+non-thinking and capped at 16 output tokens. They now get a different run hash, so they are rerun
+rather than reused as cache hits.
+
+## Environment variables
+
+| Variable | What it does |
+|---|---|
+| `BLINDEARTH_CACHE` | cache directory for masks and region polygons (default `~/.cache/blindearth`) |
+| `BLINDEARTH_ACCEPT_NEW_CHECKSUMS=1` | accept a changed upstream download once and record its new hash |
+| `BLINDEARTH_MODIS_DOWNLOAD=1` | allow the MOD44W download and mosaic |
+| `BLINDEARTH_MODIS_YEAR` | MOD44W year (default 2021) |
+| `EARTHDATA_TOKEN` | NASA Earthdata token for MOD44W (or use `~/.netrc`) |
+| `BLINDEARTH_REGIONS` | `auto`, `cached` or `boxes` (see [Regions](#regions)) |
+| `BLINDEARTH_PRICING` | YAML file whose prices override `blindearth/data/pricing.yaml` |
+| API keys | whatever each provider's `api_key_env` names, e.g. `ANTHROPIC_API_KEY` |
+
+Prices in `blindearth/data/pricing.yaml` are defaults and should be checked against the vendors'
+current price lists before you trust the cost estimates.
+
 ## Tests
 
 ```bash
+pip install -e '.[dev,ui]'
 pytest
 ```
 
-The tests for the store, hashing, planner and executor use fake adapters and a fake registry, so
-they make no network calls.
+The tests use fake adapters, a fake registry and mocked HTTP (`respx`), so they make no network
+calls and need no API keys. Regions fall back to the boxes under pytest. The mask download tests
+build zip archives in memory and patch the downloader.
